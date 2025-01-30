@@ -1,187 +1,120 @@
 import os
-import logging
-import psycopg2
-from fastapi import FastAPI
-import uvicorn
 import asyncio
-from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+import asyncpg
+import logging
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.executors.asyncio import AsyncIOExecutor
-from apscheduler.executors.pool import ThreadPoolExecutor
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ✅ Читаем переменные окружения
-TOKEN = os.getenv("TOKEN")
+# 🔹 Читаем токен бота и URL базы данных из переменных окружения
+BOT_TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not TOKEN or not DATABASE_URL:
-    raise ValueError("Не заданы переменные окружения TOKEN и DATABASE_URL")
-
-# Подключаемся к PostgreSQL
-conn = psycopg2.connect(DATABASE_URL)
-cur = conn.cursor()
-
-# Создаём таблицы, если их нет
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS reports (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        username TEXT,
-        text TEXT,
-        date TEXT
-    )
-""")
-
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS reminders (
-        user_id BIGINT PRIMARY KEY,
-        remind_time TEXT
-    )
-""")
-conn.commit()
-
-# Инициализируем бота
+# 🔹 Создаем бота и диспетчер
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# 📌 Настраиваем APScheduler
-scheduler = AsyncIOScheduler(
-    executors={
-        "default": ThreadPoolExecutor(1),  # Запускает задачи в потоках
-        "asyncio": AsyncIOExecutor()  # Позволяет выполнять асинхронные задачи
-    }
-)
+# 🔹 Создаём пул соединений с PostgreSQL
+async def create_db_pool():
+    return await asyncpg.create_pool(DATABASE_URL)
 
-# 📌 Главное меню кнопок
-menu_keyboard = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="📢 Сообщить отчёт"), KeyboardButton(text="📊 Запросить отчёт")],
-    [KeyboardButton(text="⏰ Установить напоминание"), KeyboardButton(text="ℹ️ Помощь")]
-], resize_keyboard=True)
+db_pool = None
 
-# 📌 Команда /start
-async def start_command(message: Message):
-    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", reply_markup=menu_keyboard)
+# 🔹 Функция для создания таблицы, если её нет
+async def setup_database():
+    global db_pool
+    db_pool = await create_db_pool()
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS reports (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                username TEXT,
+                report TEXT,
+                created_at TIMESTAMP DEFAULT now()
+            )
+        ''')
 
-# 📌 Команда /help
-async def help_command(message: Message):
-    await message.answer(
-        "📌 Доступные команды:\n"
-        "📢 /report – Записать отчёт о дне\n"
-        "📊 /get – Запросить отчёт (выбор кнопками)\n"
-        "⏰ /reminder – Установить время напоминания\n"
-        "ℹ️ /help – Список команд\n"
-        "🔄 /start – Перезапустить бота",
-        reply_markup=menu_keyboard
-    )
+# 🔹 Команда /start
+@dp.message(Command("start"))
+async def start_command(message: types.Message):
+    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал. Используй /help для справки.")
 
-# 📌 Установка напоминания
-async def reminder_command(message: Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{hour}:00", callback_data=f"reminder_{hour}")] for hour in range(0, 24)
-    ])
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="reminder_manual")])
-    await message.answer("⏰ Выбери время напоминания или введи вручную:", reply_markup=keyboard)
+# 🔹 Команда /help
+@dp.message(Command("help"))
+async def help_command(message: types.Message):
+    help_text = """
+    📌 Доступные команды:
+    ✅ /report - Создать или обновить отчёт
+    ✅ /get_report - Запросить отчёт
+    ✅ /help - Показать справку
+    """
+    await message.answer(help_text)
 
-@dp.callback_query(lambda c: c.data == "reminder_manual")
-async def manual_reminder(callback: types.CallbackQuery):
-    await callback.message.edit_text("Введите время в формате ЧЧ:ММ (например, 14:30):")
+# 🔹 Команда /report (создать или обновить отчёт)
+@dp.message(Command("report"))
+async def create_report(message: types.Message):
+    await message.answer("Напиши, что ты сделал сегодня:")
 
-@dp.callback_query(lambda c: c.data.startswith("reminder_"))
-async def set_reminder(callback: types.CallbackQuery):
-    hour = callback.data.replace("reminder_", "")
-    remind_time = f"{hour}:00"
-    cur.execute("INSERT INTO reminders (user_id, remind_time) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET remind_time = %s",
-                (callback.from_user.id, remind_time, remind_time))
-    conn.commit()
-    await callback.message.edit_text(f"✅ Напоминание установлено на {remind_time}!")
+    @dp.message()
+    async def save_report(report_message: types.Message):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO reports (user_id, username, report) VALUES ($1, $2, $3)",
+                report_message.from_user.id, report_message.from_user.username, report_message.text
+            )
+        await report_message.answer("✅ Отчёт сохранён!")
 
-# 📌 Сообщение отчёта
-async def report_command(message: Message):
-    await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
+# 🔹 Команда /get_report (запрос отчёта)
+@dp.message(Command("get_report"))
+async def get_report(message: types.Message):
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT DISTINCT user_id, username FROM reports")
 
-async def handle_report_text(message: Message):
-    text = message.text.strip()
-    if text.startswith("/") or text in ["📊 Запросить отчёт", "📢 Сообщить отчёт", "⏰ Установить напоминание", "ℹ️ Помощь"]:
-        return
-    date_today = datetime.now().strftime("%Y-%m-%d")
-    cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (message.from_user.id, date_today))
-    existing_record = cur.fetchone()
-
-    if existing_record:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Дополнить", callback_data=f"append_{text}")],
-            [InlineKeyboardButton(text="✏️ Заменить", callback_data=f"replace_{text}")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
-        ])
-        await message.answer(f"⚠️ Отчёт за сегодня уже существует. Что сделать?", reply_markup=keyboard)
-    else:
-        cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
-                    (message.from_user.id, message.from_user.username or message.from_user.first_name, text, date_today))
-        conn.commit()
-        await message.answer("✅ Отчёт записан!")
-
-# 📌 Запрос отчёта
-async def get_report_command(message: Message):
-    cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
-    users = cur.fetchall()
     if not users:
-        await message.answer("❌ Нет пользователей с отчётами.")
+        await message.answer("❌ Нет доступных отчётов.")
         return
-    buttons = [[InlineKeyboardButton(text=f"@{user[0]}", callback_data=f"user_{user[0]}")] for user in users]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
 
-# 📌 Напоминания пользователям
-async def send_reminders():
-    now = datetime.now().strftime("%H:%M")
-    cur.execute("SELECT user_id FROM reminders WHERE remind_time = %s", (now,))
-    users = cur.fetchall()
-    if not users:
+    keyboard = InlineKeyboardMarkup()
+    for user in users:
+        keyboard.add(InlineKeyboardButton(user["username"], callback_data=f"user_{user['user_id']}"))
+
+    await message.answer("Выбери пользователя:", reply_markup=keyboard)
+
+# 🔹 Обработчик выбора пользователя в отчёте
+@dp.callback_query(lambda call: call.data.startswith("user_"))
+async def select_user(call: types.CallbackQuery):
+    user_id = int(call.data.split("_")[1])
+    async with db_pool.acquire() as conn:
+        reports = await conn.fetch("SELECT report, created_at FROM reports WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5", user_id)
+
+    if not reports:
+        await call.message.answer("❌ У этого пользователя нет отчетов.")
         return
-    for user_id in users:
-        await bot.send_message(user_id[0], "📝 Время заполнить отчёт! Напиши /report")
 
-app = FastAPI()
+    report_text = "\n".join([f"{r['created_at']}: {r['report']}" for r in reports])
+    await call.message.answer(f"📜 Последние отчеты:\n{report_text}")
 
-@app.get("/")
-async def root():
-    return {"message": "Bot is running"}
+# 🔹 Ежедневное напоминание "Че делаешь?"
+async def daily_reminder():
+    while True:
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT DISTINCT user_id FROM reports")
 
-async def start_bot():
-    loop = asyncio.get_event_loop()
-    loop.create_task(main())  # Запускаем бота в фоне
+        for user in users:
+            try:
+                await bot.send_message(user["user_id"], "Че делаешь? 🧐")
+            except Exception as e:
+                logging.error(f"Ошибка отправки сообщения: {e}")
 
+        await asyncio.sleep(86400)  # Ждём 24 часа
 
-
-# 📌 Запуск бота
+# 🔹 Главная асинхронная функция (запуск бота)
 async def main():
-    dp.message.register(start_command, Command("start"))
-    dp.message.register(help_command, Command("help"))
-    dp.message.register(report_command, Command("report"))
-    dp.message.register(get_report_command, Command("get"))
-    dp.message.register(reminder_command, Command("reminder"))
+    await setup_database()
+    asyncio.create_task(daily_reminder())  # Запускаем ежедневное напоминание
+    await dp.start_polling(bot)
 
-    dp.message.register(handle_report_text, F.text)
-
-    # ✅ Запускаем `send_reminders` через `run_coroutine_threadsafe`
-    loop = asyncio.get_event_loop()
-    scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(send_reminders(), loop), "cron", minute="*", second=0)
-    scheduler.start()
-
-    logging.info("Бот успешно запущен!")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, drop_pending_updates=True)
-
+# 🔹 Запуск
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_bot())  # Запуск бота
-
-    # Запускаем FastAPI сервер
-    try:
-        uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
-    except KeyboardInterrupt:
-        print("Бот остановлен")
-
-
+    asyncio.run(main())
