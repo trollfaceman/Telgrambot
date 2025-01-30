@@ -2,9 +2,9 @@ import os
 import logging
 import psycopg2
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -55,7 +55,7 @@ async def start_command(message: Message):
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
 async def report_command(message: Message):
-    await message.answer("Напиши, что ты сегодня делал, например: /report Работал над проектом")
+    await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
 
 async def handle_report_text(message: Message):
     text = message.text.strip()
@@ -66,13 +66,50 @@ async def handle_report_text(message: Message):
 
 # 📌 Команда /get (или кнопка "📊 Запросить отчёт")
 async def get_report_command(message: Message):
-    await message.answer("Напиши дату и ник в формате:\n/get @username YYYY-MM-DD")
+    # Получаем всех пользователей, которые уже отправляли отчёты
+    cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
+    users = cur.fetchall()
+    
+    if not users:
+        await message.answer("❌ Нет доступных пользователей.")
+        return
+
+    # Создаём кнопки с именами пользователей
+    buttons = [InlineKeyboardButton(text=f"@{user[0]}", callback_data=f"user_{user[0]}") for user in users]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+    await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
+
+# 📌 Обработчик выбора пользователя
+@dp.callback_query(lambda c: c.data.startswith("user_"))
+async def select_user(callback: types.CallbackQuery):
+    username = callback.data.replace("user_", "")
+
+    # Создаём кнопки с последними 7 датами
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    buttons = [InlineKeyboardButton(text=date, callback_data=f"date_{username}_{date}") for date in dates]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+    await callback.message.answer(f"📅 Выбран пользователь: @{username}\nТеперь выбери дату:", reply_markup=keyboard)
+
+# 📌 Обработчик выбора даты
+@dp.callback_query(lambda c: c.data.startswith("date_"))
+async def select_date(callback: types.CallbackQuery):
+    _, username, date = callback.data.split("_")
+
+    cur.execute("SELECT text FROM reports WHERE username=%s AND date=%s", (username, date))
+    record = cur.fetchone()
+
+    if record:
+        await callback.message.answer(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
+    else:
+        await callback.message.answer(f"❌ Нет отчётов @{username} за {date}.")
 
 # 📌 Команда /help
 async def help_command(message: Message):
     await message.answer("📌 Доступные команды:\n"
                          "/report – Записать отчёт о дне\n"
-                         "/get @username YYYY-MM-DD – Получить отчёт по дате\n"
+                         "/get – Запросить отчёт (выбор кнопками)\n"
                          "/start – Перезапустить бота", reply_markup=menu_keyboard)
 
 # 📌 Функция отправки ежедневного запроса
@@ -86,17 +123,19 @@ async def main():
     dp.message.register(get_report_command, Command("get"))
     dp.message.register(help_command, Command("help"))
 
-    # Кнопки без команд
     dp.message.register(report_command, F.text == "📢 Сообщить отчёт")
     dp.message.register(get_report_command, F.text == "📊 Запросить отчёт")
     dp.message.register(help_command, F.text == "ℹ️ Помощь")
     dp.message.register(handle_report_text, F.text)
 
-    scheduler.add_job(daily_task, "cron", hour=18)  # Планируем задачу
-    scheduler.start()  # Запускаем планировщик
+    dp.callback_query.register(select_user)
+    dp.callback_query.register(select_date)
+
+    scheduler.add_job(daily_task, "cron", hour=18)
+    scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
