@@ -76,6 +76,7 @@ async def reminder_command(message: Message):
     await message.answer("⏰ Выбери время напоминания:", reply_markup=keyboard)
 
 
+
 @dp.callback_query(lambda c: c.data.startswith("reminder_"))
 async def set_reminder(callback: types.CallbackQuery):
     hour = callback.data.replace("reminder_", "")
@@ -172,15 +173,43 @@ async def select_date(callback: types.CallbackQuery):
         await callback.message.edit_text(f"❌ Нет отчётов @{username} за {date}.")
 
 
+@dp.callback_query(lambda c: c.data.startswith("append_"))
+async def append_report(callback: types.CallbackQuery):
+    new_text = callback.data.replace("append_", "")
+    date_today = datetime.now().strftime("%Y-%m-%d")
+
+    cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (callback.from_user.id, date_today))
+    existing_record = cur.fetchone()
+
+    if existing_record:
+        updated_text = existing_record[0] + "\n➕ " + new_text
+        cur.execute("UPDATE reports SET text=%s WHERE user_id=%s AND date=%s", (updated_text, callback.from_user.id, date_today))
+        conn.commit()
+        await callback.message.edit_text("✅ Отчёт дополнен!")
+    else:
+        await callback.message.edit_text("❌ Ошибка: отчёт не найден.")
+
+@dp.callback_query(lambda c: c.data.startswith("replace_"))
+async def replace_report(callback: types.CallbackQuery):
+    new_text = callback.data.replace("replace_", "")
+    date_today = datetime.now().strftime("%Y-%m-%d")
+
+    cur.execute("UPDATE reports SET text=%s WHERE user_id=%s AND date=%s", (new_text, callback.from_user.id, date_today))
+    conn.commit()
+    await callback.message.edit_text("✅ Отчёт обновлён!")
+
+
+
 # 📌 Отправка напоминаний
 async def send_reminders():
     now = datetime.now().strftime("%H:%M")
-    
+
     cur.execute("SELECT user_id FROM reminders WHERE remind_time = %s", (now,))
     users = cur.fetchall()
 
     for user_id in users:
         await bot.send_message(user_id[0], "📝 Время заполнить отчёт! Напиши /report")
+
 
 # 📌 Запуск бота
 async def main():
@@ -211,6 +240,7 @@ async def main():
     
     except Exception as e:
         logging.error(f"Ошибка при запуске бота: {e}")
+
 
 
 if __name__ == "__main__":
