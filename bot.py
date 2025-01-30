@@ -61,18 +61,15 @@ class ReportState(StatesGroup):
     waiting_for_report = State()
 
 
-async def is_chat_group_or_private(message: Message):
-    return message.chat.type in ["group", "supergroup", "private"]
-
-
 
 # 📌 Команда /start
 async def start_command(message: Message):
-    if await is_chat_group_or_private(message):
+    if message.chat.type in ["group", "supergroup", "private"]:  # Проверяем, что чат - это группа или личка
         await message.answer(
             "Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:",
-            reply_markup=menu_keyboard
+            reply_markup=menu_keyboard  # Тут была ошибка с inline_menu_keyboard
         )
+
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
 async def report_command(message: Message, state: FSMContext):
@@ -274,7 +271,7 @@ async def keep_awake():
 
 
 async def main():
-    dp.message.register(start_command, Command("start"), is_chat_group_or_private)
+    dp.message.register(start_command, Command("start"))
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report_command, Command("get"))
     dp.message.register(help_command, Command("help"))
@@ -294,7 +291,7 @@ async def main():
     asyncio.create_task(keep_awake())
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, allowed_updates=types.AllowedUpdates.all())
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
