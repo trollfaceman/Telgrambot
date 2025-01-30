@@ -41,7 +41,17 @@ conn.commit()
 # Инициализируем бота
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+# Импортируем планировщик
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+# Создаём планировщик задач
+scheduler = AsyncIOScheduler()
+
+# Добавляем задачу отправки напоминаний
 scheduler.add_job(lambda: asyncio.create_task(send_reminders()), "cron", minute="*", second=0)
+
+# Запускаем планировщик
+scheduler.start()
 
 
 
