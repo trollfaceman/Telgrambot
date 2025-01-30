@@ -46,10 +46,12 @@ logging.basicConfig(level=logging.INFO)
 users = set()
 
 # 📌 Главное меню кнопок
-menu_keyboard = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="📢 Сообщить отчёт"), KeyboardButton(text="📊 Запросить отчёт")],
-    [KeyboardButton(text="ℹ️ Помощь")]
-], resize_keyboard=True)
+menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="📢 Сообщить отчёт", callback_data="report")],
+    [InlineKeyboardButton(text="📊 Запросить отчёт", callback_data="get")],
+    [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help")]
+])
+
 
 
 class ReportState(StatesGroup):
@@ -63,7 +65,8 @@ class ReportState(StatesGroup):
 # 📌 Команда /start
 async def start_command(message: Message):
     users.add(message.from_user.id)
-    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", reply_markup=menu_keyboard)
+    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", 
+                         reply_markup=inline_menu_keyboard)
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
 async def report_command(message: Message, state: FSMContext):
@@ -91,7 +94,7 @@ async def handle_report_text(message: Message, state: FSMContext):
         cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
                     (new_text, message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
         conn.commit()
-        await message.answer("✅ Твой отчёт дополнен!", reply_markup=menu_keyboard)
+        await message.answer("✅ Твой отчёт дополнен!", reply_markup=inline_menu_keyboard)
         await state.clear()
         return
 
@@ -179,7 +182,7 @@ async def confirm_report(callback: types.CallbackQuery, state: FSMContext):
 
     conn.commit()
 
-    await callback.message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
+    await callback.message.answer("✅ Отчёт записан!", reply_markup=inline_menu_keyboard)
     await state.clear()
     await callback.answer()
 
@@ -232,12 +235,26 @@ async def help_command(message: Message):
     await message.answer("📌 Доступные команды:\n"
                          "/report – Записать отчёт о дне\n"
                          "/get – Запросить отчёт (выбор кнопками)\n"
-                         "/start – Перезапустить бота", reply_markup=menu_keyboard)
+                         "/start – Перезапустить бота", reply_markup=inline_menu_keyboard)
 
 # 📌 Функция отправки ежедневного запроса
 async def daily_task():
     for user_id in users:
         await bot.send_message(user_id, "📝 Что ты сегодня делал? Напиши /report [твой ответ]")
+
+
+@dp.callback_query(lambda c: c.data == "report")
+async def report_callback(callback: types.CallbackQuery):
+    await report_command(callback.message)
+
+@dp.callback_query(lambda c: c.data == "get")
+async def get_callback(callback: types.CallbackQuery):
+    await get_report_command(callback.message)
+
+@dp.callback_query(lambda c: c.data == "help")
+async def help_callback(callback: types.CallbackQuery):
+    await help_command(callback.message)
+
 
 
 async def keep_awake():
