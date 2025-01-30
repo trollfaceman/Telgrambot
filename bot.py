@@ -53,6 +53,17 @@ async def start_command(message: Message):
     users.add(message.from_user.id)
     await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", reply_markup=menu_keyboard)
 
+# 📌 Команда /help
+async def help_command(message: Message):
+    await message.answer(
+        "📌 Доступные команды:\n"
+        "📢 /report – Записать отчёт о дне\n"
+        "📊 /get – Запросить отчёт (выбор кнопками)\n"
+        "ℹ️ /help – Список команд\n"
+        "🔄 /start – Перезапустить бота",
+        reply_markup=menu_keyboard
+    )
+
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
 async def report_command(message: Message):
     await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
@@ -131,31 +142,6 @@ async def get_report_command(message: Message):
 
     await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
 
-# 📌 Обработчик выбора пользователя
-@dp.callback_query(lambda c: c.data.startswith("user_"))
-async def select_user(callback: types.CallbackQuery):
-    username = callback.data.replace("user_", "")
-
-    # Создаём кнопки с последними 7 датами (без года)
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%d %b") for i in range(7)]
-    buttons = [InlineKeyboardButton(text=date, callback_data=f"date_{username}_{(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')}") for i, date in enumerate(dates)]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-
-    await callback.message.answer(f"📅 Выбран пользователь: @{username}\nТеперь выбери дату:", reply_markup=keyboard)
-
-# 📌 Обработчик выбора даты
-@dp.callback_query(lambda c: c.data.startswith("date_"))
-async def select_date(callback: types.CallbackQuery):
-    _, username, date = callback.data.split("_")
-
-    cur.execute("SELECT text FROM reports WHERE username=%s AND date=%s", (username, date))
-    record = cur.fetchone()
-
-    if record:
-        await callback.message.answer(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
-    else:
-        await callback.message.answer(f"❌ Нет отчётов @{username} за {date}.")
-
 # 📌 Функция отправки ежедневного запроса
 async def daily_task():
     for user_id in users:
@@ -165,15 +151,13 @@ async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report_command, Command("get"))
-    dp.message.register(help_command, Command("help"))
+    dp.message.register(help_command, Command("help"))  # ✅ Добавлено
 
     dp.message.register(handle_report_text, F.text)
 
     dp.callback_query.register(confirm_report)
     dp.callback_query.register(append_report)
     dp.callback_query.register(replace_report)
-    dp.callback_query.register(select_user)
-    dp.callback_query.register(select_date)
 
     scheduler.add_job(daily_task, "cron", hour=18)
     scheduler.start()
