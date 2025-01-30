@@ -7,6 +7,9 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
 
 # ✅ Читаем переменные окружения
 TOKEN = os.getenv("TOKEN")
@@ -48,6 +51,11 @@ menu_keyboard = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="ℹ️ Помощь")]
 ], resize_keyboard=True)
 
+
+class ReportState(StatesGroup):
+    waiting_for_confirmation = State()
+
+
 # 📌 Команда /start
 async def start_command(message: Message):
     users.add(message.from_user.id)
@@ -57,12 +65,33 @@ async def start_command(message: Message):
 async def report_command(message: Message):
     await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
 
-async def handle_report_text(message: Message):
+async def handle_report_text(message: Message, state: FSMContext):
+    # Проверяем, есть ли уже отчёт за сегодня
+    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
+                (message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
+    existing_report = cur.fetchone()
+
+    if existing_report:
+        # Кнопки выбора: заменить или дополнить
+        edit_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить отчёт", callback_data="edit_existing_report")],
+            [InlineKeyboardButton(text="➕ Добавить к отчёту", callback_data="add_to_report")]
+        ])
+        await message.answer("⚠️ У тебя уже есть отчёт за сегодня. Что ты хочешь сделать?", reply_markup=edit_keyboard)
+        return  # Выход из функции, чтобы не предлагать подтвердить новый отчёт
+
+    # Запрашиваем подтверждение перед сохранением
     text = message.text.strip()
-    cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
-                (message.from_user.id, message.from_user.username, text, datetime.now().strftime("%Y-%m-%d")))
-    conn.commit()
-    await message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
+    await state.update_data(report_text=text)
+
+    confirm_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_report")],
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_report")]
+    ])
+
+    await message.answer(f"📄 Твой отчёт:\n\n{text}\n\nТы подтверждаешь?", reply_markup=confirm_keyboard)
+    await state.set_state(ReportState.waiting_for_confirmation)
+
 
 # 📌 Команда /get (или кнопка "📊 Запросить отчёт")
 async def get_report_command(message: Message):
@@ -104,6 +133,67 @@ async def select_date(callback: types.CallbackQuery):
         await callback.message.answer(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
     else:
         await callback.message.answer(f"❌ Нет отчётов @{username} за {date}.")
+
+
+@dp.callback_query(lambda c: c.data == "confirm_report")
+async def confirm_report(callback: types.CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    new_text = user_data.get("report_text")
+    append_mode = user_data.get("append_mode", False)  # Проверяем, был ли режим добавления
+
+    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
+                (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
+    existing_report = cur.fetchone()
+
+    if existing_report and append_mode:
+        updated_text = existing_report[0] + "\n" + new_text  # Дописываем новый текст
+        cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
+                    (updated_text, callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
+    else:
+        cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
+                    (callback.from_user.id, callback.from_user.username, new_text, datetime.now().strftime("%Y-%m-%d")))
+    
+    conn.commit()
+
+    await callback.message.answer("✅ Отчёт обновлён!", reply_markup=menu_keyboard)
+    await state.clear()
+    await callback.answer()
+
+
+
+
+
+@dp.callback_query(lambda c: c.data == "edit_report")
+async def edit_report(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("✏️ Напиши новый отчёт:")
+    await state.clear()
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "edit_existing_report")
+async def edit_existing_report(callback: types.CallbackQuery, state: FSMContext):
+    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s",
+                (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
+    existing_report = cur.fetchone()
+
+    if existing_report:
+        await state.update_data(report_text=existing_report[0])  # Сохраняем текущий отчёт в состоянии
+
+    await callback.message.answer("✏️ Напиши новый отчёт:")
+    await state.set_state(ReportState.waiting_for_confirmation)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "add_to_report")
+async def add_to_report(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(append_mode=True)  # Сохраняем, что надо дописать, а не перезаписать
+    await callback.message.answer("✏️ Напиши, что хочешь добавить к отчёту:")
+    await state.set_state(ReportState.waiting_for_confirmation)
+    await callback.answer()
+
+
+
+
 
 # 📌 Команда /help
 async def help_command(message: Message):
