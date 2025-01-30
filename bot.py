@@ -66,6 +66,8 @@ async def report_command(message: Message):
     await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
 
 async def handle_report_text(message: Message, state: FSMContext):
+    if not message.text.startswith("/report"):  # ✅ Игнорируем всё кроме команд
+        return
     user_data = await state.get_data()
     append_mode = user_data.get("append_mode", False)  # Проверяем, режим ли "добавления"
 
@@ -231,6 +233,17 @@ async def daily_task():
     for user_id in users:
         await bot.send_message(user_id, "📝 Что ты сегодня делал? Напиши /report [твой ответ]")
 
+
+async def keep_awake():
+    while True:
+        try:
+            logging.info("🔄 Keep-alive ping")
+            await bot.get_me()  # Запрос к Telegram API (любой метод)
+        except Exception as e:
+            logging.error(f"❌ Keep-alive error: {e}")
+        await asyncio.sleep(300)  # Ждать 5 минут
+
+
 async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(report_command, Command("report"))
@@ -247,6 +260,9 @@ async def main():
 
     scheduler.add_job(daily_task, "cron", hour=18)
     scheduler.start()
+
+     # ✅ Запускаем Keep-Alive в фоне
+    asyncio.create_task(keep_awake())
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
