@@ -78,16 +78,17 @@ class ReportState(StatesGroup):
 async def start_command(message: Message):
     logging.info(f"Бот получил /start в чате {message.chat.id} (тип: {message.chat.type})")
 
-    if message.chat.type == "private":
+    if message.chat.type in ["group", "supergroup"]:
+        await message.answer(
+            "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Воспользуйся командой /menu для вызова меню.",
+            reply_markup=group_menu_keyboard
+        )
+    else:
         await message.answer(
             "Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:",
             reply_markup=menu_keyboard
         )
-    else:
-        await message.answer(
-            "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Выбери команду ниже:",
-            reply_markup=group_menu_keyboard
-        )
+
 
 
 
@@ -290,9 +291,10 @@ async def bot_added_to_group(event: ChatMemberUpdated):
         logging.info(f"Бот добавлен в группу: {event.chat.id}")
         await bot.send_message(
             event.chat.id,
-            "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Выбери команду ниже:",
+            "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Введи /menu для вызова меню.",
             reply_markup=group_menu_keyboard
         )
+
 
 async def keep_awake():
     while True:
@@ -304,11 +306,21 @@ async def keep_awake():
         await asyncio.sleep(300)  # Ждать 5 минут
 
 
+async def menu_command(message: Message):
+    if message.chat.type in ["group", "supergroup"]:
+        await message.answer("📌 Главное меню:", reply_markup=group_menu_keyboard)
+    else:
+        await message.answer("📌 Главное меню:", reply_markup=menu_keyboard)
+
+
+
+
 async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report_command, Command("get"))
     dp.message.register(help_command, Command("help"))
+    dp.message.register(menu_command, Command("menu"))  # ✅ Здесь
 
     dp.message.register(report_command, F.text == "📢 Сообщить отчёт")
     dp.message.register(get_report_command, F.text == "📊 Запросить отчёт")
@@ -329,7 +341,6 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
