@@ -19,7 +19,7 @@ if not TOKEN or not DATABASE_URL:
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
-# Создаём таблицу, если её нет
+# Создаём таблицы, если их нет
 cur.execute("""
     CREATE TABLE IF NOT EXISTS reports (
         id SERIAL PRIMARY KEY,
@@ -27,6 +27,13 @@ cur.execute("""
         username TEXT,
         text TEXT,
         date TEXT
+    )
+""")
+
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS reminders (
+        user_id BIGINT PRIMARY KEY,
+        remind_time TEXT
     )
 """)
 conn.commit()
@@ -42,12 +49,11 @@ logging.basicConfig(level=logging.INFO)
 # 📌 Главное меню кнопок
 menu_keyboard = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="📢 Сообщить отчёт"), KeyboardButton(text="📊 Запросить отчёт")],
-    [KeyboardButton(text="ℹ️ Помощь")]
+    [KeyboardButton(text="⏰ Установить напоминание"), KeyboardButton(text="ℹ️ Помощь")]
 ], resize_keyboard=True)
 
 # 📌 Команда /start
 async def start_command(message: Message):
-    users.add(message.from_user.id)
     await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", reply_markup=menu_keyboard)
 
 # 📌 Команда /help
@@ -56,10 +62,28 @@ async def help_command(message: Message):
         "📌 Доступные команды:\n"
         "📢 /report – Записать отчёт о дне\n"
         "📊 /get – Запросить отчёт (выбор кнопками)\n"
+        "⏰ /reminder – Установить время напоминания\n"
         "ℹ️ /help – Список команд\n"
         "🔄 /start – Перезапустить бота",
         reply_markup=menu_keyboard
     )
+
+# 📌 Установка напоминания
+async def reminder_command(message: Message):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{hour}:00", callback_data=f"reminder_{hour}") for hour in range(17, 22)]
+    ])
+    await message.answer("⏰ Выбери время напоминания:", reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data.startswith("reminder_"))
+async def set_reminder(callback: types.CallbackQuery):
+    hour = callback.data.replace("reminder_", "")
+
+    cur.execute("INSERT INTO reminders (user_id, remind_time) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET remind_time = %s",
+                (callback.from_user.id, hour, hour))
+    conn.commit()
+
+    await callback.message.edit_text(f"✅ Напоминание установлено на {hour}:00!")
 
 # 📌 Команда /report
 async def report_command(message: Message):
@@ -68,8 +92,8 @@ async def report_command(message: Message):
 async def handle_report_text(message: Message):
     text = message.text.strip()
 
-    # Игнорируем команды (не записываем их в отчёт)
-    if text.startswith("/"):
+    # Игнорируем команды и кнопки
+    if text.startswith("/") or text in ["📊 Запросить отчёт", "📢 Сообщить отчёт", "⏰ Установить напоминание", "ℹ️ Помощь"]:
         return
 
     date_today = datetime.now().strftime("%Y-%m-%d")
@@ -90,7 +114,6 @@ async def handle_report_text(message: Message):
         ])
         await message.answer(f"📌 Ты хочешь записать:\n{text}\n\nПодтвердить запись?", reply_markup=keyboard)
 
-# 📌 Подтверждение записи
 @dp.callback_query(lambda c: c.data.startswith("confirm_"))
 async def confirm_report(callback: types.CallbackQuery):
     text = callback.data.replace("confirm_", "")
@@ -100,7 +123,7 @@ async def confirm_report(callback: types.CallbackQuery):
                 (callback.from_user.id, callback.from_user.username, text, date_today))
     conn.commit()
     
-    await callback.message.edit_text("✅ Отчёт записан!") 
+    await callback.message.edit_text("✅ Отчёт записан!")
 
 # 📌 Запрос отчёта /get
 async def get_report_command(message: Message):
@@ -116,7 +139,6 @@ async def get_report_command(message: Message):
 
     await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
 
-# 📌 Выбор пользователя
 @dp.callback_query(lambda c: c.data.startswith("user_"))
 async def select_user(callback: types.CallbackQuery):
     username = callback.data.replace("user_", "")
@@ -127,7 +149,6 @@ async def select_user(callback: types.CallbackQuery):
 
     await callback.message.edit_text(f"📅 Выбран пользователь: @{username}\nТеперь выбери дату:", reply_markup=keyboard)
 
-# 📌 Выбор даты
 @dp.callback_query(lambda c: c.data.startswith("date_"))
 async def select_date(callback: types.CallbackQuery):
     _, username, date = callback.data.split("_")
@@ -140,24 +161,18 @@ async def select_date(callback: types.CallbackQuery):
     else:
         await callback.message.edit_text(f"❌ Нет отчётов @{username} за {date}.")
 
-# 📌 Функция отправки ежедневного запроса
-async def daily_task():
-    for user_id in users:
-        await bot.send_message(user_id, "📝 Что ты сегодня делал? Напиши /report [твой ответ]")
+# 📌 Отправка напоминаний
+async def send_reminders():
+    cur.execute("SELECT user_id, remind_time FROM reminders")
+    users = cur.fetchall()
 
+    for user_id, remind_time in users:
+        if remind_time == str(datetime.now().hour):
+            await bot.send_message(user_id, "📝 Время заполнить отчёт! Напиши /report")
+
+# 📌 Запуск бота
 async def main():
-    dp.message.register(start_command, Command("start"))
-    dp.message.register(report_command, Command("report"))
-    dp.message.register(get_report_command, Command("get"))
-    dp.message.register(help_command, Command("help"))
-
-    dp.message.register(handle_report_text, F.text)
-
-    dp.callback_query.register(confirm_report)
-    dp.callback_query.register(select_user)
-    dp.callback_query.register(select_date)
-
-    scheduler.add_job(daily_task, "cron", hour=18)
+    scheduler.add_job(send_reminders, "cron", minute=0)
     scheduler.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
