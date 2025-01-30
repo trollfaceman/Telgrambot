@@ -10,7 +10,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ChatMemberUpdated
+from datetime import datetime, timedelta
+import locale
 
+# Устанавливаем русский язык для дней недели
+locale.setlocale(locale.LC_TIME, "ru_RU.UTF-8")
 
 # ✅ Читаем переменные окружения
 TOKEN = os.getenv("TOKEN")
@@ -47,11 +51,21 @@ logging.basicConfig(level=logging.INFO)
 users = set()
 
 # 📌 Главное меню кнопок
-menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+# Меню для ЛС (inline-кнопки)
+menu_keyboard_private = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📢 Сообщить отчёт", callback_data="report")],
     [InlineKeyboardButton(text="📊 Запросить отчёт", callback_data="get")],
     [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help")]
 ])
+
+# Меню для групп (обычные кнопки)
+menu_keyboard_group = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📢 Сообщить отчёт"), KeyboardButton(text="📊 Запросить отчёт")],
+        [KeyboardButton(text="ℹ️ Помощь")]
+    ],
+    resize_keyboard=True
+)
 
 
 
@@ -63,20 +77,16 @@ class ReportState(StatesGroup):
 
 # 📌 Команда /start
 async def start_command(message: Message):
-    logging.info(f"Бот получил /start в чате {message.chat.id} (тип: {message.chat.type})")
-    await message.answer(
-        "Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:",
-        reply_markup=menu_keyboard
-    )
-
+    keyboard = menu_keyboard_private if message.chat.type == "private" else menu_keyboard_group
+    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", reply_markup=keyboard)
 
 
 
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
 async def report_command(message: Message, state: FSMContext):
-    # Убрана проверка на тип чата, всегда используем menu_keyboard
-    await message.answer("✏️ Напиши, что ты сегодня делал...", reply_markup=menu_keyboard)
+    keyboard = menu_keyboard_private if message.chat.type == "private" else menu_keyboard_group
+    await message.answer("✏️ Напиши, что ты сегодня делал...", reply_markup=keyboard)
     await state.set_state(ReportState.waiting_for_report)
 
 
@@ -85,38 +95,44 @@ async def handle_report_text(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state != ReportState.waiting_for_report.state:
         return
-    
+
     user_data = await state.get_data()
     append_mode = user_data.get("append_mode", False)
 
-    # Проверяем, есть ли уже отчёт за сегодня
     cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
                 (message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
     existing_report = cur.fetchone()
 
     if append_mode and existing_report:
-        new_text = user_data.get("report_text") + "\n" + message.text.strip()
+        new_text = existing_report[0] + "\n" + message.text.strip()  # 🟢 Добавляем к существующему отчёту
         cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
                     (new_text, message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
         conn.commit()
-        await message.answer("✅ Твой отчёт дополнен!", reply_markup=menu_keyboard)
-        await state.clear()
+
+        keyboard = menu_keyboard_private if message.chat.type == "private" else menu_keyboard_group
+        await message.answer("✅ Твой отчёт дополнен!", reply_markup=keyboard)
+        await state.clear()  # 🟢 Сбрасываем состояние после добавления
         return
 
+    # 🟢 Клавиатура выбора действия (изменить, добавить, отмена)
+    edit_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить отчёт", callback_data="edit_existing_report")],
+        [InlineKeyboardButton(text="➕ Добавить к отчёту", callback_data="add_to_report")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
+    ])
+
     if existing_report:
-        edit_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Изменить отчёт", callback_data="edit_existing_report")],
-            [InlineKeyboardButton(text="➕ Добавить к отчёту", callback_data="add_to_report")]
-        ])
         await message.answer("⚠️ У тебя уже есть отчёт за сегодня. Что ты хочешь сделать?", reply_markup=edit_keyboard)
         return
 
+    # 🟢 Создаём новый отчёт
     text = message.text.strip()
     await state.update_data(report_text=text, append_mode=False)
 
     confirm_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_report")],
-        [InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_report")]
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_report")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
     ])
 
     await message.answer(f"📄 Твой отчёт:\n\n{text}\n\nТы подтверждаешь?", reply_markup=confirm_keyboard)
@@ -128,30 +144,40 @@ async def get_report_command(message: Message):
     try:
         cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
         users_from_db = cur.fetchall()
-    
-    if not users_from_db:
-        await message.answer("❌ Нет доступных пользователей.")
-        return
 
-    buttons = [InlineKeyboardButton(text=f"@{user[0]}", callback_data=f"user_{user[0]}") for user in users_from_db]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-    await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
+        if not users_from_db:
+            await message.answer("❌ Нет доступных пользователей.")
+            return
+
+        buttons = [InlineKeyboardButton(text=f"@{user[0]}", callback_data=f"user_{user[0]}") for user in users_from_db]
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+        await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
 
     except Exception as e:
         logging.error(f"Ошибка БД: {e}")
         await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
+
 
 # 📌 Обработчик выбора пользователя
 @dp.callback_query(lambda c: c.data.startswith("user_"))
 async def select_user(callback: types.CallbackQuery):
     username = callback.data.replace("user_", "")
 
-    # Создаём кнопки с последними 7 датами
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
-    buttons = [InlineKeyboardButton(text=date, callback_data=f"date_{username}_{date}") for date in dates]
+    # Генерируем кнопки с последними 7 датами
+    dates = [(datetime.now() - timedelta(days=i)) for i in range(7)]
+    buttons = [
+        InlineKeyboardButton(
+            text=date.strftime("%d %b (%a)"),  # Формат: "31 Янв (Ср)"
+            callback_data=f"date_{username}_{date.strftime('%Y-%m-%d')}"
+        )
+        for date in dates
+    ]
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-
-    await callback.message.answer(f"📅 Выбран пользователь: @{username}\nТеперь выбери дату:", reply_markup=keyboard)
+    await callback.message.answer(
+        f"📅 Выбран пользователь: @{username}\nВыбери дату отчёта:", 
+        reply_markup=keyboard
+    )
 
 # 📌 Обработчик выбора даты
 @dp.callback_query(lambda c: c.data.startswith("date_"))
@@ -189,12 +215,19 @@ async def confirm_report(callback: types.CallbackQuery, state: FSMContext):
 
     conn.commit()
 
-    await callback.message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
+    keyboard = menu_keyboard_private if callback.message.chat.type == "private" else menu_keyboard_group
+    await callback.message.answer("✅ Отчёт записан!", reply_markup=keyboard)
     await state.clear()
     await callback.answer()
 
 
 
+@dp.callback_query(lambda c: c.data == "cancel_report")
+async def cancel_report(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()  # 🟢 Сбрасываем состояние
+    keyboard = menu_keyboard_private if callback.message.chat.type == "private" else menu_keyboard_group
+    await callback.message.answer("🚫 Действие отменено.", reply_markup=keyboard)
+    await callback.answer()
 
 
 
@@ -225,13 +258,14 @@ async def add_to_report(callback: types.CallbackQuery, state: FSMContext):
     existing_report = cur.fetchone()
 
     if existing_report:
-        await state.update_data(report_text=existing_report[0], append_mode=True)  # Устанавливаем режим добавления
+        await state.update_data(report_text=existing_report[0], append_mode=True)  # 🟢 Устанавливаем режим добавления
         await callback.message.answer("✏️ Напиши, что хочешь добавить к отчёту:")
-        await state.set_state(ReportState.waiting_for_confirmation)
+        await state.set_state(ReportState.waiting_for_report)  # 🟢 Устанавливаем правильное состояние
     else:
         await callback.message.answer("⚠️ Ошибка: нет отчёта для дополнения.")
-    
+
     await callback.answer()
+
 
 
 
@@ -239,10 +273,13 @@ async def add_to_report(callback: types.CallbackQuery, state: FSMContext):
 
 # 📌 Команда /help
 async def help_command(message: Message):
+    keyboard = menu_keyboard_private if message.chat.type == "private" else menu_keyboard_group
     await message.answer("📌 Доступные команды:\n"
                          "/report – Записать отчёт о дне\n"
                          "/get – Запросить отчёт (выбор кнопками)\n"
-                         "/start – Перезапустить бота", reply_markup=menu_keyboard)
+                         "/start – Перезапустить бота", reply_markup=keyboard)
+
+
 
 # 📌 Функция отправки ежедневного запроса
 async def daily_task():
@@ -255,17 +292,35 @@ async def daily_task():
             logging.error(f"Ошибка отправки уведомления: {e}")
 
 
-@dp.callback_query(lambda c: c.data == "report")
+@dp.callback_query(F.data == "report")
 async def report_callback(callback: types.CallbackQuery, state: FSMContext):
-    await report_command(callback.message, state)  # Передаем state
+    await callback.answer()  # Чтобы убрать "часики" загрузки
+    await report_command(callback.message, state)
 
-@dp.callback_query(lambda c: c.data == "get")
+@dp.callback_query(F.data == "get")
 async def get_callback(callback: types.CallbackQuery):
-    await get_report_command(callback.message) 
+    await callback.answer()
+    await get_report_command(callback.message)
 
-@dp.callback_query(lambda c: c.data == "help")
+@dp.callback_query(F.data == "help")
 async def help_callback(callback: types.CallbackQuery):
+    await callback.answer()
     await help_command(callback.message)
+
+
+@dp.message(F.text == "📢 Сообщить отчёт")
+async def report_text_command(message: Message, state: FSMContext):
+    await report_command(message, state)
+
+@dp.message(F.text == "📊 Запросить отчёт")
+async def get_text_command(message: Message):
+    await get_report_command(message)
+
+@dp.message(F.text == "ℹ️ Помощь")
+async def help_text_command(message: Message):
+    await help_command(message)
+
+
 
 
 @dp.chat_member()
@@ -275,7 +330,7 @@ async def bot_added_to_group(event: ChatMemberUpdated):
         await bot.send_message(
             event.chat.id,
             "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Выбери команду ниже:",
-            reply_markup=menu_keyboard  # Используем инлайн-меню
+            reply_markup=menu_keyboard_group  # 💡 Исправил!
         )
 
 async def keep_awake():
@@ -298,8 +353,7 @@ async def main():
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report_command, Command("get"))
     dp.message.register(help_command, Command("help"))
-
-    dp.message.register(handle_report_text, ReportState.waiting_for_report)
+    dp.message.register(handle_report_text, ReportState.waiting_for_report)  # 💡 Хендлер состояния теперь определён
 
     dp.callback_query.register(select_user)
     dp.callback_query.register(select_date)
@@ -308,14 +362,22 @@ async def main():
     dp.callback_query.register(edit_existing_report)
     dp.callback_query.register(add_to_report)
 
+    # 📌 Логирование всех обновлений, чтобы видеть, что получает бот
+    @dp.update()
+    async def handle_all_updates(update: types.Update):
+        logging.info(f"🔹 Получено обновление: {update}")
+
     scheduler.add_job(daily_task, "cron", hour=18)
     scheduler.start()
 
     asyncio.create_task(keep_awake())
 
+    # Логирование зарегистрированных хендлеров (проверка)
+    logging.info(f"✅ Зарегистрированные хендлеры: {dp.message.handlers}")
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
-    await bot.delete_webhook(drop_pending_updates=True)
+
     try:
         await dp.start_polling(bot)
     finally:
