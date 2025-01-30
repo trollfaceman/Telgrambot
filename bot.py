@@ -88,8 +88,11 @@ async def start_command(message: Message):
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
 async def report_command(message: Message, state: FSMContext):
-    await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
+    keyboard = menu_keyboard if message.chat.type == "private" else group_menu_keyboard
+
+    await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.", reply_markup=keyboard)
     await state.set_state(ReportState.waiting_for_report)  # ✅ Бот теперь "ждёт" текст отчёта
+
 
 
 async def handle_report_text(message: Message, state: FSMContext):
@@ -112,7 +115,7 @@ async def handle_report_text(message: Message, state: FSMContext):
         cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
                     (new_text, message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
         conn.commit()
-        await message.answer("✅ Твой отчёт дополнен!", reply_markup=inline_menu_keyboard)
+        await message.answer("✅ Твой отчёт дополнен!", reply_markup=menu_keyboard)
         await state.clear()
         return
 
@@ -200,7 +203,7 @@ async def confirm_report(callback: types.CallbackQuery, state: FSMContext):
 
     conn.commit()
 
-    await callback.message.answer("✅ Отчёт записан!", reply_markup=inline_menu_keyboard)
+    await callback.message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
     await state.clear()
     await callback.answer()
 
@@ -253,7 +256,7 @@ async def help_command(message: Message):
     await message.answer("📌 Доступные команды:\n"
                          "/report – Записать отчёт о дне\n"
                          "/get – Запросить отчёт (выбор кнопками)\n"
-                         "/start – Перезапустить бота", reply_markup=inline_menu_keyboard)
+                         "/start – Перезапустить бота", reply_markup=menu_keyboard)
 
 # 📌 Функция отправки ежедневного запроса
 async def daily_task():
@@ -298,15 +301,19 @@ async def main():
 
     dp.callback_query.register(select_user)
     dp.callback_query.register(select_date)
+    dp.callback_query.register(confirm_report)
+    dp.callback_query.register(edit_report)
+    dp.callback_query.register(edit_existing_report)
+    dp.callback_query.register(add_to_report)
 
     scheduler.add_job(daily_task, "cron", hour=18)
     scheduler.start()
 
-     # ✅ Запускаем Keep-Alive в фоне
     asyncio.create_task(keep_awake())
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
