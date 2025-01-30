@@ -82,10 +82,8 @@ async def report_command(message: Message, state: FSMContext):
 
 
 async def handle_report_text(message: Message, state: FSMContext):
-    state_data = await state.get_state()
-    
-    # ✅ Если бот НЕ находится в ожидании отчёта — игнорируем сообщение
-    if state_data != ReportState.waiting_for_report.state:
+    current_state = await state.get_state()
+    if current_state != ReportState.waiting_for_report.state:
         return
     
     user_data = await state.get_data()
@@ -127,9 +125,9 @@ async def handle_report_text(message: Message, state: FSMContext):
 
 # 📌 Команда /get (или кнопка "📊 Запросить отчёт")
 async def get_report_command(message: Message):
-    # Получаем пользователей из БД вместо переменной users
-    cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
-    users_from_db = cur.fetchall()
+    try:
+        cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
+        users_from_db = cur.fetchall()
     
     if not users_from_db:
         await message.answer("❌ Нет доступных пользователей.")
@@ -138,6 +136,10 @@ async def get_report_command(message: Message):
     buttons = [InlineKeyboardButton(text=f"@{user[0]}", callback_data=f"user_{user[0]}") for user in users_from_db]
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
     await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
+
+    except Exception as e:
+        logging.error(f"Ошибка БД: {e}")
+        await message.answer("⚠️ Произошла ошибка. Попробуйте позже.")
 
 # 📌 Обработчик выбора пользователя
 @dp.callback_query(lambda c: c.data.startswith("user_"))
@@ -244,17 +246,22 @@ async def help_command(message: Message):
 
 # 📌 Функция отправки ежедневного запроса
 async def daily_task():
-    for user_id in users:
-        await bot.send_message(user_id, "📝 Что ты сегодня делал? Напиши /report [твой ответ]")
+    cur.execute("SELECT DISTINCT user_id FROM reports")
+    users_from_db = cur.fetchall()
+    for user in users_from_db:
+        try:
+            await bot.send_message(user[0], "📝 Что ты сегодня делал? Напиши /report")
+        except Exception as e:
+            logging.error(f"Ошибка отправки уведомления: {e}")
 
 
 @dp.callback_query(lambda c: c.data == "report")
-async def report_callback(callback: types.CallbackQuery):
-    await report_command(callback.message)
+async def report_callback(callback: types.CallbackQuery, state: FSMContext):
+    await report_command(callback.message, state)  # Передаем state
 
 @dp.callback_query(lambda c: c.data == "get")
 async def get_callback(callback: types.CallbackQuery):
-    await get_report_command(callback.message)
+    await get_report_command(callback.message) 
 
 @dp.callback_query(lambda c: c.data == "help")
 async def help_callback(callback: types.CallbackQuery):
@@ -281,16 +288,18 @@ async def keep_awake():
         await asyncio.sleep(300)  # Ждать 5 минут
 
 
+async def on_shutdown():
+    cur.close()
+    conn.close()
+    logging.info("Бот остановлен. Соединение с БД закрыто.")
+
 async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report_command, Command("get"))
     dp.message.register(help_command, Command("help"))
 
-    dp.message.register(report_command, F.text == "📢 Сообщить отчёт")
-    dp.message.register(get_report_command, F.text == "📊 Запросить отчёт")
-    dp.message.register(help_command, F.text == "ℹ️ Помощь")
-    dp.message.register(handle_report_text, F.text)
+    dp.message.register(handle_report_text, ReportState.waiting_for_report)
 
     dp.callback_query.register(select_user)
     dp.callback_query.register(select_date)
@@ -306,6 +315,11 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
+    await bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await on_shutdown()
 
 
 if __name__ == "__main__":
