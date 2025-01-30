@@ -83,14 +83,13 @@ async def daily_task():
     for user_id in users:
         await bot.send_message(user_id, "Что ты сегодня делал? Напиши /report [твой ответ]")
 
-# Запускаем ежедневное напоминание в 18:00
-scheduler.add_job(daily_task, "cron", hour=18)
-scheduler.start()
-
 async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report, Command("get"))
+
+    scheduler.add_job(daily_task, "cron", hour=18)  # Планируем задачу
+    scheduler.start()  # ✅ Запускаем в правильном месте
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
