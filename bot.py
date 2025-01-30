@@ -150,7 +150,10 @@ async def root():
     return {"message": "Bot is running"}
 
 async def start_bot():
-    await main()  # Запускаем бота
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())  # Запускаем бота в фоне
+
+
 
 # 📌 Запуск бота
 async def main():
@@ -173,7 +176,12 @@ async def main():
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.create_task(start_bot())  # Запуск бота в фоне
+    loop.create_task(start_bot())  # Запуск бота
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))  # Запуск веб-сервера
+    # Запускаем FastAPI сервер
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    except KeyboardInterrupt:
+        print("Бот остановлен")
+
 
