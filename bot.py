@@ -71,19 +71,22 @@ async def help_command(message: Message):
 # 📌 Установка напоминания
 async def reminder_command(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{hour}:00", callback_data=f"reminder_{hour}") for hour in range(17, 22)]
+        [InlineKeyboardButton(text=f"{hour}:00", callback_data=f"reminder_{hour}")] for hour in range(17, 22)
     ])
     await message.answer("⏰ Выбери время напоминания:", reply_markup=keyboard)
+
 
 @dp.callback_query(lambda c: c.data.startswith("reminder_"))
 async def set_reminder(callback: types.CallbackQuery):
     hour = callback.data.replace("reminder_", "")
+    remind_time = f"{hour}:00"  # Добавляем ":00" для полноты формата
 
     cur.execute("INSERT INTO reminders (user_id, remind_time) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET remind_time = %s",
-                (callback.from_user.id, hour, hour))
+                (callback.from_user.id, remind_time, remind_time))
     conn.commit()
 
-    await callback.message.edit_text(f"✅ Напоминание установлено на {hour}:00!")
+    await callback.message.edit_text(f"✅ Напоминание установлено на {remind_time}!")
+
 
 # 📌 Команда /report
 async def report_command(message: Message):
@@ -92,7 +95,6 @@ async def report_command(message: Message):
 async def handle_report_text(message: Message):
     text = message.text.strip()
 
-    # Игнорируем команды и кнопки
     if text.startswith("/") or text in ["📊 Запросить отчёт", "📢 Сообщить отчёт", "⏰ Установить напоминание", "ℹ️ Помощь"]:
         return
 
@@ -113,6 +115,7 @@ async def handle_report_text(message: Message):
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
         ])
         await message.answer(f"📌 Ты хочешь записать:\n{text}\n\nПодтвердить запись?", reply_markup=keyboard)
+
 
 @dp.callback_query(lambda c: c.data.startswith("confirm_"))
 async def confirm_report(callback: types.CallbackQuery):
@@ -151,7 +154,14 @@ async def select_user(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("date_"))
 async def select_date(callback: types.CallbackQuery):
-    _, username, date = callback.data.split("_")
+    try:
+        parts = callback.data.split("_")
+        if len(parts) < 3:
+            return await callback.answer("Ошибка при выборе даты!")
+
+        _, username, date = parts
+    except ValueError:
+        return await callback.answer("Ошибка при разборе даты!")
 
     cur.execute("SELECT text FROM reports WHERE username=%s AND date=%s", (username, date))
     record = cur.fetchone()
@@ -161,22 +171,47 @@ async def select_date(callback: types.CallbackQuery):
     else:
         await callback.message.edit_text(f"❌ Нет отчётов @{username} за {date}.")
 
+
 # 📌 Отправка напоминаний
 async def send_reminders():
-    cur.execute("SELECT user_id, remind_time FROM reminders")
+    now = datetime.now().strftime("%H:%M")
+    
+    cur.execute("SELECT user_id FROM reminders WHERE remind_time = %s", (now,))
     users = cur.fetchall()
 
-    for user_id, remind_time in users:
-        if remind_time == str(datetime.now().hour):
-            await bot.send_message(user_id, "📝 Время заполнить отчёт! Напиши /report")
+    for user_id in users:
+        await bot.send_message(user_id[0], "📝 Время заполнить отчёт! Напиши /report")
 
 # 📌 Запуск бота
 async def main():
-    scheduler.add_job(send_reminders, "cron", minute=0)
-    scheduler.start()
+    try:
+        dp.message.register(start_command, Command("start"))
+        dp.message.register(help_command, Command("help"))
+        dp.message.register(report_command, Command("report"))
+        dp.message.register(get_report_command, Command("get"))
+        dp.message.register(reminder_command, Command("reminder"))
 
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, drop_pending_updates=True)
+        dp.message.register(handle_report_text, F.text)
+
+        dp.callback_query.register(confirm_report)
+        dp.callback_query.register(set_reminder)
+        dp.callback_query.register(select_user)
+        dp.callback_query.register(select_date)
+
+        # 🔴 Добавляем обработчики дополнения и замены отчёта
+        dp.callback_query.register(append_report)
+        dp.callback_query.register(replace_report)
+
+        scheduler.add_job(send_reminders, "cron", minute="*", second=0)
+        scheduler.start()
+
+        logging.info("Бот успешно запущен!")
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, drop_pending_updates=True)
+    
+    except Exception as e:
+        logging.error(f"Ошибка при запуске бота: {e}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
