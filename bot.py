@@ -1,120 +1,102 @@
 import os
-import asyncio
-import asyncpg
 import logging
-from aiogram import Bot, Dispatcher, types
+import psycopg2
+import asyncio
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# 🔹 Читаем токен бота и URL базы данных из переменных окружения
-BOT_TOKEN = os.getenv("TOKEN")
+# ✅ Читаем переменные окружения
+TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 🔹 Создаем бота и диспетчер
+if not TOKEN or not DATABASE_URL:
+    raise ValueError("Не заданы переменные окружения TOKEN и DATABASE_URL")
+
+# Подключаемся к PostgreSQL
+conn = psycopg2.connect(DATABASE_URL)
+cur = conn.cursor()
+
+# Создаём таблицу, если её нет
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS reports (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        username TEXT,
+        text TEXT,
+        date TEXT
+    )
+""")
+conn.commit()
+
+# Инициализируем бота
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+scheduler = AsyncIOScheduler()
 
-# 🔹 Создаём пул соединений с PostgreSQL
-async def create_db_pool():
-    return await asyncpg.create_pool(DATABASE_URL)
+# Логирование
+logging.basicConfig(level=logging.INFO)
 
-db_pool = None
+# Список пользователей
+users = set()
 
-# 🔹 Функция для создания таблицы, если её нет
-async def setup_database():
-    global db_pool
-    db_pool = await create_db_pool()
-    async with db_pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS reports (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                username TEXT,
-                report TEXT,
-                created_at TIMESTAMP DEFAULT now()
-            )
-        ''')
+# 📌 Главное меню кнопок
+menu_keyboard = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="📢 Сообщить отчёт"), KeyboardButton(text="📊 Запросить отчёт")],
+    [KeyboardButton(text="ℹ️ Помощь")]
+], resize_keyboard=True)
 
-# 🔹 Команда /start
-@dp.message(Command("start"))
-async def start_command(message: types.Message):
-    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал. Используй /help для справки.")
+# 📌 Команда /start
+async def start_command(message: Message):
+    users.add(message.from_user.id)
+    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", reply_markup=menu_keyboard)
 
-# 🔹 Команда /help
-@dp.message(Command("help"))
-async def help_command(message: types.Message):
-    help_text = """
-    📌 Доступные команды:
-    ✅ /report - Создать или обновить отчёт
-    ✅ /get_report - Запросить отчёт
-    ✅ /help - Показать справку
-    """
-    await message.answer(help_text)
+# 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
+async def report_command(message: Message):
+    await message.answer("Напиши, что ты сегодня делал, например: /report Работал над проектом")
 
-# 🔹 Команда /report (создать или обновить отчёт)
-@dp.message(Command("report"))
-async def create_report(message: types.Message):
-    await message.answer("Напиши, что ты сделал сегодня:")
+async def handle_report_text(message: Message):
+    text = message.text.strip()
+    cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
+                (message.from_user.id, message.from_user.username, text, datetime.now().strftime("%Y-%m-%d")))
+    conn.commit()
+    await message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
 
-    @dp.message()
-    async def save_report(report_message: types.Message):
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO reports (user_id, username, report) VALUES ($1, $2, $3)",
-                report_message.from_user.id, report_message.from_user.username, report_message.text
-            )
-        await report_message.answer("✅ Отчёт сохранён!")
+# 📌 Команда /get (или кнопка "📊 Запросить отчёт")
+async def get_report_command(message: Message):
+    await message.answer("Напиши дату и ник в формате:\n/get @username YYYY-MM-DD")
 
-# 🔹 Команда /get_report (запрос отчёта)
-@dp.message(Command("get_report"))
-async def get_report(message: types.Message):
-    async with db_pool.acquire() as conn:
-        users = await conn.fetch("SELECT DISTINCT user_id, username FROM reports")
+# 📌 Команда /help
+async def help_command(message: Message):
+    await message.answer("📌 Доступные команды:\n"
+                         "/report – Записать отчёт о дне\n"
+                         "/get @username YYYY-MM-DD – Получить отчёт по дате\n"
+                         "/start – Перезапустить бота", reply_markup=menu_keyboard)
 
-    if not users:
-        await message.answer("❌ Нет доступных отчётов.")
-        return
+# 📌 Функция отправки ежедневного запроса
+async def daily_task():
+    for user_id in users:
+        await bot.send_message(user_id, "📝 Что ты сегодня делал? Напиши /report [твой ответ]")
 
-    keyboard = InlineKeyboardMarkup()
-    for user in users:
-        keyboard.add(InlineKeyboardButton(user["username"], callback_data=f"user_{user['user_id']}"))
-
-    await message.answer("Выбери пользователя:", reply_markup=keyboard)
-
-# 🔹 Обработчик выбора пользователя в отчёте
-@dp.callback_query(lambda call: call.data.startswith("user_"))
-async def select_user(call: types.CallbackQuery):
-    user_id = int(call.data.split("_")[1])
-    async with db_pool.acquire() as conn:
-        reports = await conn.fetch("SELECT report, created_at FROM reports WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5", user_id)
-
-    if not reports:
-        await call.message.answer("❌ У этого пользователя нет отчетов.")
-        return
-
-    report_text = "\n".join([f"{r['created_at']}: {r['report']}" for r in reports])
-    await call.message.answer(f"📜 Последние отчеты:\n{report_text}")
-
-# 🔹 Ежедневное напоминание "Че делаешь?"
-async def daily_reminder():
-    while True:
-        async with db_pool.acquire() as conn:
-            users = await conn.fetch("SELECT DISTINCT user_id FROM reports")
-
-        for user in users:
-            try:
-                await bot.send_message(user["user_id"], "Че делаешь? 🧐")
-            except Exception as e:
-                logging.error(f"Ошибка отправки сообщения: {e}")
-
-        await asyncio.sleep(86400)  # Ждём 24 часа
-
-# 🔹 Главная асинхронная функция (запуск бота)
 async def main():
-    await setup_database()
-    asyncio.create_task(daily_reminder())  # Запускаем ежедневное напоминание
+    dp.message.register(start_command, Command("start"))
+    dp.message.register(report_command, Command("report"))
+    dp.message.register(get_report_command, Command("get"))
+    dp.message.register(help_command, Command("help"))
+
+    # Кнопки без команд
+    dp.message.register(report_command, F.text == "📢 Сообщить отчёт")
+    dp.message.register(get_report_command, F.text == "📊 Запросить отчёт")
+    dp.message.register(help_command, F.text == "ℹ️ Помощь")
+    dp.message.register(handle_report_text, F.text)
+
+    scheduler.add_job(daily_task, "cron", hour=18)  # Планируем задачу
+    scheduler.start()  # Запускаем планировщик
+
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-# 🔹 Запуск
 if __name__ == "__main__":
     asyncio.run(main())
