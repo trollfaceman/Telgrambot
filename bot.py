@@ -73,16 +73,19 @@ class ReportState(StatesGroup):
 
 # 📌 Команда /start
 async def start_command(message: Message):
+    logging.info(f"Бот получил /start в чате {message.chat.id} (тип: {message.chat.type})")
+
     if message.chat.type == "private":  # В ЛИЧКЕ – Inline-кнопки
         await message.answer(
             "Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:",
             reply_markup=menu_keyboard  # Inline-кнопки
         )
-    else:  # В ГРУППЕ – Reply-кнопки
+    else:  # В ГРУППЕ – Reply-клавиатура (меню в поле ввода)
         await message.answer(
             "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Выбери команду ниже:",
-            reply_markup=group_menu_keyboard  # Reply-клавиатура
+            reply_markup=group_menu_keyboard
         )
+
 
 
 
