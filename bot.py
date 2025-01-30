@@ -274,7 +274,7 @@ async def keep_awake():
 
 
 async def main():
-    dp.message.register(start_command, Command("start"))
+    dp.message.register(start_command, Command("start"), is_chat_group_or_private)
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report_command, Command("get"))
     dp.message.register(help_command, Command("help"))
@@ -294,7 +294,7 @@ async def main():
     asyncio.create_task(keep_awake())
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, drop_pending_updates=True)
+    await dp.start_polling(bot, allowed_updates=types.AllowedUpdates.all())
 
 if __name__ == "__main__":
     asyncio.run(main())
