@@ -41,24 +41,7 @@ conn.commit()
 # Инициализируем бота
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-# Импортируем планировщик
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-# Создаём планировщик задач
 scheduler = AsyncIOScheduler()
-
-# Добавляем задачу отправки напоминаний
-scheduler.add_job(lambda: asyncio.create_task(send_reminders()), "cron", minute="*", second=0)
-
-# Запускаем планировщик
-scheduler.start()
-
-
-
-
-
-# Логирование
-logging.basicConfig(level=logging.INFO)
 
 # 📌 Главное меню кнопок
 menu_keyboard = ReplyKeyboardMarkup(keyboard=[
@@ -88,210 +71,91 @@ async def reminder_command(message: Message):
         [InlineKeyboardButton(text=f"{hour}:00", callback_data=f"reminder_{hour}")] for hour in range(0, 24)
     ])
     keyboard.inline_keyboard.append([InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="reminder_manual")])
-
     await message.answer("⏰ Выбери время напоминания или введи вручную:", reply_markup=keyboard)
-
-
 
 @dp.callback_query(lambda c: c.data == "reminder_manual")
 async def manual_reminder(callback: types.CallbackQuery):
     await callback.message.edit_text("Введите время в формате ЧЧ:ММ (например, 14:30):")
 
-
 @dp.callback_query(lambda c: c.data.startswith("reminder_"))
 async def set_reminder(callback: types.CallbackQuery):
     hour = callback.data.replace("reminder_", "")
-    remind_time = f"{hour}:00"  # Добавляем ":00" для полноты формата
-
+    remind_time = f"{hour}:00"
     cur.execute("INSERT INTO reminders (user_id, remind_time) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET remind_time = %s",
                 (callback.from_user.id, remind_time, remind_time))
     conn.commit()
-
     await callback.message.edit_text(f"✅ Напоминание установлено на {remind_time}!")
 
-
-# 📌 Команда /report
+# 📌 Сообщение отчёта
 async def report_command(message: Message):
     await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
 
 async def handle_report_text(message: Message):
     text = message.text.strip()
-
     if text.startswith("/") or text in ["📊 Запросить отчёт", "📢 Сообщить отчёт", "⏰ Установить напоминание", "ℹ️ Помощь"]:
         return
-
     date_today = datetime.now().strftime("%Y-%m-%d")
-
     cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (message.from_user.id, date_today))
     existing_record = cur.fetchone()
 
     if existing_record:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👀 Посмотреть отчёт", callback_data="view_report")],
             [InlineKeyboardButton(text="➕ Дополнить", callback_data=f"append_{text}")],
             [InlineKeyboardButton(text="✏️ Заменить", callback_data=f"replace_{text}")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
         ])
         await message.answer(f"⚠️ Отчёт за сегодня уже существует. Что сделать?", reply_markup=keyboard)
     else:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{text}")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
-        ])
-        await message.answer(f"📌 Ты хочешь записать:\n{text}\n\nПодтвердить запись?", reply_markup=keyboard)
+        cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
+                    (message.from_user.id, message.from_user.username or message.from_user.first_name, text, date_today))
+        conn.commit()
+        await message.answer("✅ Отчёт записан!")
 
-@dp.callback_query(lambda c: c.data == "view_report")
-async def view_report(callback: types.CallbackQuery):
-    date_today = datetime.now().strftime("%Y-%m-%d")
-    cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (callback.from_user.id, date_today))
-    record = cur.fetchone()
-
-    if record:
-        await callback.message.edit_text(f"📝 Твой отчёт за сегодня:\n{record[0]}")
-    else:
-        await callback.message.edit_text("❌ Отчёт не найден.")
-
-
-
-@dp.callback_query(lambda c: c.data.startswith("confirm_"))
-async def confirm_report(callback: types.CallbackQuery):
-    text = callback.data.replace("confirm_", "")
-    date_today = datetime.now().strftime("%Y-%m-%d")
-
-    username = callback.from_user.username or callback.from_user.first_name
-
-    cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
-                (callback.from_user.id, username, text, date_today))
-
-    conn.commit()  # ✅ Исправлено
-
-    await callback.message.edit_text("✅ Отчёт записан!")
-
-
-
-
-@dp.callback_query(lambda c: c.data == "cancel_report")
-async def cancel_report(callback: types.CallbackQuery):
-    await callback.message.edit_text("🚫 Действие отменено.")
-
-
-# 📌 Запрос отчёта /get
+# 📌 Запрос отчёта
 async def get_report_command(message: Message):
     cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
     users = cur.fetchall()
-
     if not users:
         await message.answer("❌ Нет пользователей с отчётами.")
         return
-
-    buttons = [[InlineKeyboardButton(text=f"@{users[i][0]}", callback_data=f"user_{users[i][0]}")]
-               for i in range(len(users))]
-
+    buttons = [[InlineKeyboardButton(text=f"@{user[0]}", callback_data=f"user_{user[0]}")] for user in users]
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
-
 
 @dp.callback_query(lambda c: c.data.startswith("user_"))
 async def select_user(callback: types.CallbackQuery):
     username = callback.data.replace("user_", "")
-
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%d %b") for i in range(7)]
-    buttons = [InlineKeyboardButton(text=date, callback_data=f"date_{username}_{(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')}") for i, date in enumerate(dates)]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    buttons = [[InlineKeyboardButton(text=date, callback_data=f"date_{username}_{date}")] for date in dates]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(f"📅 Выбран пользователь: @{username}\nТеперь выбери дату:", reply_markup=keyboard)
 
 @dp.callback_query(lambda c: c.data.startswith("date_"))
 async def select_date(callback: types.CallbackQuery):
-    parts = callback.data.split("_", 2)  # Ограничиваем количество разбиений
-    username = parts[1]  # ✅ Правильный отступ
-    date = parts[2]      # ✅ Правильный отступ
-
+    _, username, date = callback.data.split("_")
     cur.execute("SELECT text FROM reports WHERE username=%s AND date=%s", (username, date))
     record = cur.fetchone()
-
     if record:
         await callback.message.edit_text(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
     else:
         await callback.message.edit_text(f"❌ Нет отчётов @{username} за {date}.")
 
-
-
-
-
-@dp.callback_query(lambda c: c.data.startswith("append_"))
-async def append_report(callback: types.CallbackQuery):
-    new_text = callback.data.replace("append_", "")
-    date_today = datetime.now().strftime("%Y-%m-%d")
-
-    cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (callback.from_user.id, date_today))
-    existing_record = cur.fetchone()
-
-    if existing_record:
-        updated_text = existing_record[0] + "\n➕ " + new_text
-        cur.execute("UPDATE reports SET text=%s WHERE user_id=%s AND date=%s", (updated_text, callback.from_user.id, date_today))
-        conn.commit()
-        await callback.message.edit_text("✅ Отчёт дополнен!")
-    else:
-        await callback.message.edit_text("❌ Ошибка: отчёт не найден.")
-
-@dp.callback_query(lambda c: c.data.startswith("replace_"))
-async def replace_report(callback: types.CallbackQuery):
-    new_text = callback.data.replace("replace_", "")
-    date_today = datetime.now().strftime("%Y-%m-%d")
-
-    cur.execute("UPDATE reports SET text=%s WHERE user_id=%s AND date=%s", (new_text, callback.from_user.id, date_today))
-    conn.commit()
-    await callback.message.edit_text("✅ Отчёт обновлён!")
-
-
-
-# 📌 Отправка напоминаний
+# 📌 Напоминания пользователям
 async def send_reminders():
     now = datetime.now().strftime("%H:%M")
-    logging.info(f"Проверяю напоминания на {now}")
-
     cur.execute("SELECT user_id FROM reminders WHERE remind_time = %s", (now,))
     users = cur.fetchall()
-
+    if not users:
+        return
     for user_id in users:
-        mention = f"[пользователь](tg://user?id={user_id[0]})"
-        await bot.send_message(user_id[0], f"📝 {mention}, время заполнить отчёт! Напиши /report", parse_mode="Markdown")
-
-
-
+        await bot.send_message(user_id[0], "📝 Время заполнить отчёт! Напиши /report")
 
 # 📌 Запуск бота
 async def main():
-    try:
-        dp.message.register(start_command, Command("start"))
-        dp.message.register(help_command, Command("help"))
-        dp.message.register(report_command, Command("report"))
-        dp.message.register(get_report_command, Command("get"))
-        dp.message.register(reminder_command, Command("reminder"))
-
-        dp.message.register(handle_report_text, F.text)
-
-        dp.callback_query.register(confirm_report)
-        dp.callback_query.register(set_reminder)
-        dp.callback_query.register(select_user)
-        dp.callback_query.register(select_date)
-
-        # 🔴 Добавляем обработчики дополнения и замены отчёта
-        dp.callback_query.register(append_report)
-        dp.callback_query.register(replace_report)
-
-        scheduler.add_job(send_reminders, "cron", minute="*", second=0)
-        scheduler.start()
-
-        logging.info("Бот успешно запущен!")
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot, drop_pending_updates=True)
-    
-    except Exception as e:
-        logging.error(f"Ошибка при запуске бота: {e}")
-
-
+    scheduler.add_job(lambda: asyncio.create_task(send_reminders()), "cron", minute="*", second=0)
+    scheduler.start()
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
