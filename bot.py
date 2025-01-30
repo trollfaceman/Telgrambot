@@ -3,7 +3,9 @@ import logging
 import psycopg2
 import asyncio
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import Message
+from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ✅ Читаем переменные окружения
@@ -42,14 +44,12 @@ logging.basicConfig(level=logging.INFO)
 users = set()
 
 # 📌 Команда /start
-@dp.message(commands=['start'])
-async def start_command(message: types.Message):
+async def start_command(message: Message):
     users.add(message.from_user.id)
     await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.")
 
 # 📌 Команда /report для отправки отчёта
-@dp.message(commands=['report'])
-async def report_command(message: types.Message):
+async def report_command(message: Message):
     text = message.text.replace("/report", "").strip()
     if not text:
         await message.answer("Напиши, что ты сегодня делал, например: /report Работал над проектом")
@@ -61,8 +61,7 @@ async def report_command(message: types.Message):
     await message.answer("Записал!")
 
 # 📌 Команда /get для запроса данных о пользователе
-@dp.message(commands=['get'])
-async def get_report(message: types.Message):
+async def get_report(message: Message):
     args = message.text.split()
     if len(args) < 3:
         await message.answer("Использование: /get @username YYYY-MM-DD")
@@ -89,6 +88,10 @@ scheduler.add_job(daily_task, "cron", hour=18)
 scheduler.start()
 
 async def main():
+    dp.message.register(start_command, Command("start"))
+    dp.message.register(report_command, Command("report"))
+    dp.message.register(get_report, Command("get"))
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
