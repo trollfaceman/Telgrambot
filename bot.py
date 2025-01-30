@@ -41,7 +41,11 @@ conn.commit()
 # Инициализируем бота
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler()
+scheduler.add_job(lambda: asyncio.create_task(send_reminders()), "cron", minute="*", second=0)
+
+
+
+
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -71,10 +75,17 @@ async def help_command(message: Message):
 # 📌 Установка напоминания
 async def reminder_command(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{hour}:00", callback_data=f"reminder_{hour}")] for hour in range(17, 22)
+        [InlineKeyboardButton(text=f"{hour}:00", callback_data=f"reminder_{hour}")] for hour in range(0, 24)
     ])
-    await message.answer("⏰ Выбери время напоминания:", reply_markup=keyboard)
+    keyboard.inline_keyboard.append([InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="reminder_manual")])
 
+    await message.answer("⏰ Выбери время напоминания или введи вручную:", reply_markup=keyboard)
+
+
+
+@dp.callback_query(lambda c: c.data == "reminder_manual")
+async def manual_reminder(callback: types.CallbackQuery):
+    await callback.message.edit_text("Введите время в формате ЧЧ:ММ (например, 14:30):")
 
 
 @dp.callback_query(lambda c: c.data.startswith("reminder_"))
@@ -106,16 +117,30 @@ async def handle_report_text(message: Message):
 
     if existing_record:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👀 Посмотреть отчёт", callback_data="view_report")],
             [InlineKeyboardButton(text="➕ Дополнить", callback_data=f"append_{text}")],
-            [InlineKeyboardButton(text="✏️ Заменить", callback_data=f"replace_{text}")]
+            [InlineKeyboardButton(text="✏️ Заменить", callback_data=f"replace_{text}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
         ])
-        await message.answer(f"⚠️ Отчёт за сегодня уже существует:\n{existing_record[0]}\n\nЧто сделать?", reply_markup=keyboard)
+        await message.answer(f"⚠️ Отчёт за сегодня уже существует. Что сделать?", reply_markup=keyboard)
     else:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{text}")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
         ])
         await message.answer(f"📌 Ты хочешь записать:\n{text}\n\nПодтвердить запись?", reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data == "view_report")
+async def view_report(callback: types.CallbackQuery):
+    date_today = datetime.now().strftime("%Y-%m-%d")
+    cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (callback.from_user.id, date_today))
+    record = cur.fetchone()
+
+    if record:
+        await callback.message.edit_text(f"📝 Твой отчёт за сегодня:\n{record[0]}")
+    else:
+        await callback.message.edit_text("❌ Отчёт не найден.")
+
 
 
 @dp.callback_query(lambda c: c.data.startswith("confirm_"))
@@ -123,11 +148,22 @@ async def confirm_report(callback: types.CallbackQuery):
     text = callback.data.replace("confirm_", "")
     date_today = datetime.now().strftime("%Y-%m-%d")
 
+    username = callback.from_user.username or callback.from_user.first_name
+
     cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
-                (callback.from_user.id, callback.from_user.username, text, date_today))
-    conn.commit()
-    
+                (callback.from_user.id, username, text, date_today))
+
+    conn.commit()  # ✅ Исправлено
+
     await callback.message.edit_text("✅ Отчёт записан!")
+
+
+
+
+@dp.callback_query(lambda c: c.data == "cancel_report")
+async def cancel_report(callback: types.CallbackQuery):
+    await callback.message.edit_text("🚫 Действие отменено.")
+
 
 # 📌 Запрос отчёта /get
 async def get_report_command(message: Message):
@@ -138,10 +174,12 @@ async def get_report_command(message: Message):
         await message.answer("❌ Нет пользователей с отчётами.")
         return
 
-    buttons = [InlineKeyboardButton(text=f"@{user[0]}", callback_data=f"user_{user[0]}") for user in users]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    buttons = [[InlineKeyboardButton(text=f"@{users[i][0]}", callback_data=f"user_{users[i][0]}")]
+               for i in range(len(users))]
 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
+
 
 @dp.callback_query(lambda c: c.data.startswith("user_"))
 async def select_user(callback: types.CallbackQuery):
@@ -155,14 +193,9 @@ async def select_user(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("date_"))
 async def select_date(callback: types.CallbackQuery):
-    try:
-        parts = callback.data.split("_")
-        if len(parts) < 3:
-            return await callback.answer("Ошибка при выборе даты!")
-
-        _, username, date = parts
-    except ValueError:
-        return await callback.answer("Ошибка при разборе даты!")
+    parts = callback.data.split("_", 2)  # Ограничиваем количество разбиений
+    username = parts[1]  # ✅ Правильный отступ
+    date = parts[2]      # ✅ Правильный отступ
 
     cur.execute("SELECT text FROM reports WHERE username=%s AND date=%s", (username, date))
     record = cur.fetchone()
@@ -171,6 +204,9 @@ async def select_date(callback: types.CallbackQuery):
         await callback.message.edit_text(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
     else:
         await callback.message.edit_text(f"❌ Нет отчётов @{username} за {date}.")
+
+
+
 
 
 @dp.callback_query(lambda c: c.data.startswith("append_"))
@@ -203,12 +239,16 @@ async def replace_report(callback: types.CallbackQuery):
 # 📌 Отправка напоминаний
 async def send_reminders():
     now = datetime.now().strftime("%H:%M")
+    logging.info(f"Проверяю напоминания на {now}")
 
     cur.execute("SELECT user_id FROM reminders WHERE remind_time = %s", (now,))
     users = cur.fetchall()
 
     for user_id in users:
-        await bot.send_message(user_id[0], "📝 Время заполнить отчёт! Напиши /report")
+        mention = f"[пользователь](tg://user?id={user_id[0]})"
+        await bot.send_message(user_id[0], f"📝 {mention}, время заполнить отчёт! Напиши /report", parse_mode="Markdown")
+
+
 
 
 # 📌 Запуск бота
