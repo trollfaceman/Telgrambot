@@ -59,17 +59,68 @@ async def report_command(message: Message):
 
 async def handle_report_text(message: Message):
     text = message.text.strip()
+    date_today = datetime.now().strftime("%Y-%m-%d")
+
+    # Проверяем, есть ли уже запись за сегодня
+    cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (message.from_user.id, date_today))
+    existing_record = cur.fetchone()
+
+    if existing_record:
+        # Если отчёт уже есть, предлагаем дополнить или заменить
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Дополнить", callback_data=f"append_{text}")],
+            [InlineKeyboardButton(text="✏️ Заменить", callback_data=f"replace_{text}")]
+        ])
+        await message.answer(f"⚠️ Отчёт за сегодня уже существует:\n{existing_record[0]}\n\nЧто сделать?", reply_markup=keyboard)
+    else:
+        # Если отчёта нет, предлагаем записать новый
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{text}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+        ])
+        await message.answer(f"📌 Ты хочешь записать:\n{text}\n\nПодтвердить запись?", reply_markup=keyboard)
+
+# 📌 Обработчик подтверждения записи
+@dp.callback_query(lambda c: c.data.startswith("confirm_"))
+async def confirm_report(callback: types.CallbackQuery):
+    text = callback.data.replace("confirm_", "")
+    date_today = datetime.now().strftime("%Y-%m-%d")
+
     cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
-                (message.from_user.id, message.from_user.username, text, datetime.now().strftime("%Y-%m-%d")))
+                (callback.from_user.id, callback.from_user.username, text, date_today))
     conn.commit()
-    await message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
+    await callback.message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
+
+# 📌 Обработчик дополнения отчёта
+@dp.callback_query(lambda c: c.data.startswith("append_"))
+async def append_report(callback: types.CallbackQuery):
+    new_text = callback.data.replace("append_", "")
+    date_today = datetime.now().strftime("%Y-%m-%d")
+
+    cur.execute("SELECT text FROM reports WHERE user_id=%s AND date=%s", (callback.from_user.id, date_today))
+    existing_record = cur.fetchone()
+
+    updated_text = existing_record[0] + "\n➕ " + new_text
+    cur.execute("UPDATE reports SET text=%s WHERE user_id=%s AND date=%s", (updated_text, callback.from_user.id, date_today))
+    conn.commit()
+    await callback.message.answer("✅ Отчёт дополнен!", reply_markup=menu_keyboard)
+
+# 📌 Обработчик замены отчёта
+@dp.callback_query(lambda c: c.data.startswith("replace_"))
+async def replace_report(callback: types.CallbackQuery):
+    new_text = callback.data.replace("replace_", "")
+    date_today = datetime.now().strftime("%Y-%m-%d")
+
+    cur.execute("UPDATE reports SET text=%s WHERE user_id=%s AND date=%s", (new_text, callback.from_user.id, date_today))
+    conn.commit()
+    await callback.message.answer("✅ Отчёт обновлён!", reply_markup=menu_keyboard)
 
 # 📌 Команда /get (или кнопка "📊 Запросить отчёт")
 async def get_report_command(message: Message):
     # Получаем всех пользователей, которые уже отправляли отчёты
     cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
     users = cur.fetchall()
-    
+
     if not users:
         await message.answer("❌ Нет доступных пользователей.")
         return
@@ -85,9 +136,9 @@ async def get_report_command(message: Message):
 async def select_user(callback: types.CallbackQuery):
     username = callback.data.replace("user_", "")
 
-    # Создаём кнопки с последними 7 датами
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
-    buttons = [InlineKeyboardButton(text=date, callback_data=f"date_{username}_{date}") for date in dates]
+    # Создаём кнопки с последними 7 датами (без года)
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%d %b") for i in range(7)]
+    buttons = [InlineKeyboardButton(text=date, callback_data=f"date_{username}_{(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')}") for i, date in enumerate(dates)]
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
 
     await callback.message.answer(f"📅 Выбран пользователь: @{username}\nТеперь выбери дату:", reply_markup=keyboard)
@@ -105,13 +156,6 @@ async def select_date(callback: types.CallbackQuery):
     else:
         await callback.message.answer(f"❌ Нет отчётов @{username} за {date}.")
 
-# 📌 Команда /help
-async def help_command(message: Message):
-    await message.answer("📌 Доступные команды:\n"
-                         "/report – Записать отчёт о дне\n"
-                         "/get – Запросить отчёт (выбор кнопками)\n"
-                         "/start – Перезапустить бота", reply_markup=menu_keyboard)
-
 # 📌 Функция отправки ежедневного запроса
 async def daily_task():
     for user_id in users:
@@ -123,11 +167,11 @@ async def main():
     dp.message.register(get_report_command, Command("get"))
     dp.message.register(help_command, Command("help"))
 
-    dp.message.register(report_command, F.text == "📢 Сообщить отчёт")
-    dp.message.register(get_report_command, F.text == "📊 Запросить отчёт")
-    dp.message.register(help_command, F.text == "ℹ️ Помощь")
     dp.message.register(handle_report_text, F.text)
 
+    dp.callback_query.register(confirm_report)
+    dp.callback_query.register(append_report)
+    dp.callback_query.register(replace_report)
     dp.callback_query.register(select_user)
     dp.callback_query.register(select_date)
 
