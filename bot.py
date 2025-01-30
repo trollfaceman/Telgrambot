@@ -66,10 +66,24 @@ async def report_command(message: Message):
     await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
 
 async def handle_report_text(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    append_mode = user_data.get("append_mode", False)  # Проверяем, режим ли "добавления"
+
     # Проверяем, есть ли уже отчёт за сегодня
     cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
                 (message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
     existing_report = cur.fetchone()
+
+    if append_mode and existing_report:
+        # Дописываем текст к существующему отчёту
+        new_text = user_data.get("report_text") + "\n" + message.text.strip()
+        cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
+                    (new_text, message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
+        conn.commit()
+        
+        await message.answer("✅ Твой отчёт дополнен!", reply_markup=menu_keyboard)
+        await state.clear()
+        return
 
     if existing_report:
         # Кнопки выбора: заменить или дополнить
@@ -82,7 +96,7 @@ async def handle_report_text(message: Message, state: FSMContext):
 
     # Запрашиваем подтверждение перед сохранением
     text = message.text.strip()
-    await state.update_data(report_text=text)
+    await state.update_data(report_text=text, append_mode=False)
 
     confirm_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_report")],
@@ -139,25 +153,28 @@ async def select_date(callback: types.CallbackQuery):
 async def confirm_report(callback: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     new_text = user_data.get("report_text")
-    append_mode = user_data.get("append_mode", False)  # Проверяем, был ли режим добавления
+    append_mode = user_data.get("append_mode", False)  # Проверяем, дополняем ли мы отчёт
 
     cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
                 (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
     existing_report = cur.fetchone()
 
     if existing_report and append_mode:
-        updated_text = existing_report[0] + "\n" + new_text  # Дописываем новый текст
+        # Дописываем новый текст к старому
+        updated_text = existing_report[0] + "\n" + new_text
         cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
                     (updated_text, callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
     else:
+        # Записываем новый отчёт
         cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
                     (callback.from_user.id, callback.from_user.username, new_text, datetime.now().strftime("%Y-%m-%d")))
-    
+
     conn.commit()
 
-    await callback.message.answer("✅ Отчёт обновлён!", reply_markup=menu_keyboard)
+    await callback.message.answer("✅ Отчёт записан!", reply_markup=menu_keyboard)
     await state.clear()
     await callback.answer()
+
 
 
 
@@ -172,23 +189,30 @@ async def edit_report(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "edit_existing_report")
 async def edit_existing_report(callback: types.CallbackQuery, state: FSMContext):
-    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s",
+    cur.execute("DELETE FROM reports WHERE user_id = %s AND date = %s",
                 (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
-    existing_report = cur.fetchone()
+    conn.commit()
 
-    if existing_report:
-        await state.update_data(report_text=existing_report[0])  # Сохраняем текущий отчёт в состоянии
-
+    await state.clear()  # Удаляем все состояния, чтобы не зависнуть в старых данных
     await callback.message.answer("✏️ Напиши новый отчёт:")
     await state.set_state(ReportState.waiting_for_confirmation)
     await callback.answer()
 
 
+
 @dp.callback_query(lambda c: c.data == "add_to_report")
 async def add_to_report(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(append_mode=True)  # Сохраняем, что надо дописать, а не перезаписать
-    await callback.message.answer("✏️ Напиши, что хочешь добавить к отчёту:")
-    await state.set_state(ReportState.waiting_for_confirmation)
+    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s",
+                (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
+    existing_report = cur.fetchone()
+
+    if existing_report:
+        await state.update_data(report_text=existing_report[0], append_mode=True)  # Устанавливаем режим добавления
+        await callback.message.answer("✏️ Напиши, что хочешь добавить к отчёту:")
+        await state.set_state(ReportState.waiting_for_confirmation)
+    else:
+        await callback.message.answer("⚠️ Ошибка: нет отчёта для дополнения.")
+    
     await callback.answer()
 
 
