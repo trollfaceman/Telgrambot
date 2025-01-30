@@ -53,6 +53,15 @@ menu_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
+group_menu_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📢 Сообщить отчёт")],
+        [KeyboardButton(text="📊 Запросить отчёт")],
+        [KeyboardButton(text="ℹ️ Помощь")]
+    ],
+    resize_keyboard=True
+)
+
 
 class ReportState(StatesGroup):
     waiting_for_confirmation = State()
@@ -64,11 +73,17 @@ class ReportState(StatesGroup):
 
 # 📌 Команда /start
 async def start_command(message: Message):
-    if message.chat.type in ["group", "supergroup", "private"]:  # Проверяем, что чат - это группа или личка
+    if message.chat.type == "private":  # В ЛИЧКЕ – Inline-кнопки
         await message.answer(
             "Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:",
-            reply_markup=menu_keyboard  # Тут была ошибка с inline_menu_keyboard
+            reply_markup=menu_keyboard  # Inline-кнопки
         )
+    else:  # В ГРУППЕ – Reply-кнопки
+        await message.answer(
+            "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Выбери команду ниже:",
+            reply_markup=group_menu_keyboard  # Reply-клавиатура
+        )
+
 
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
