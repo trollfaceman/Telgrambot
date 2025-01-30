@@ -61,12 +61,18 @@ class ReportState(StatesGroup):
     waiting_for_report = State()
 
 
+async def is_chat_group_or_private(message: Message):
+    return message.chat.type in ["group", "supergroup", "private"]
+
+
 
 # 📌 Команда /start
 async def start_command(message: Message):
-    users.add(message.from_user.id)
-    await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", 
-                         reply_markup=inline_menu_keyboard)
+    if await is_chat_group_or_private(message):
+        await message.answer(
+            "Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:",
+            reply_markup=menu_keyboard
+        )
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
 async def report_command(message: Message, state: FSMContext):
