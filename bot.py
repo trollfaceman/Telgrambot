@@ -7,6 +7,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.executors.asyncio import AsyncIOExecutor
+from apscheduler.executors.pool import ThreadPoolExecutor
 
 # ✅ Читаем переменные окружения
 TOKEN = os.getenv("TOKEN")
@@ -41,7 +43,14 @@ conn.commit()
 # Инициализируем бота
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler()
+
+# 📌 Настраиваем APScheduler
+scheduler = AsyncIOScheduler(
+    executors={
+        "default": ThreadPoolExecutor(1),  # Запускает задачи в потоках
+        "asyncio": AsyncIOExecutor()  # Позволяет выполнять асинхронные задачи
+    }
+)
 
 # 📌 Главное меню кнопок
 menu_keyboard = ReplyKeyboardMarkup(keyboard=[
@@ -122,24 +131,6 @@ async def get_report_command(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("👤 Выбери пользователя:", reply_markup=keyboard)
 
-@dp.callback_query(lambda c: c.data.startswith("user_"))
-async def select_user(callback: types.CallbackQuery):
-    username = callback.data.replace("user_", "")
-    dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
-    buttons = [[InlineKeyboardButton(text=date, callback_data=f"date_{username}_{date}")] for date in dates]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.edit_text(f"📅 Выбран пользователь: @{username}\nТеперь выбери дату:", reply_markup=keyboard)
-
-@dp.callback_query(lambda c: c.data.startswith("date_"))
-async def select_date(callback: types.CallbackQuery):
-    _, username, date = callback.data.split("_")
-    cur.execute("SELECT text FROM reports WHERE username=%s AND date=%s", (username, date))
-    record = cur.fetchone()
-    if record:
-        await callback.message.edit_text(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
-    else:
-        await callback.message.edit_text(f"❌ Нет отчётов @{username} за {date}.")
-
 # 📌 Напоминания пользователям
 async def send_reminders():
     now = datetime.now().strftime("%H:%M")
@@ -160,7 +151,9 @@ async def main():
 
     dp.message.register(handle_report_text, F.text)
 
-    scheduler.add_job(lambda: asyncio.create_task(send_reminders()), "cron", minute="*", second=0)
+    # ✅ Запускаем `send_reminders` через `run_coroutine_threadsafe`
+    loop = asyncio.get_event_loop()
+    scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(send_reminders(), loop), "cron", minute="*", second=0)
     scheduler.start()
 
     logging.info("Бот успешно запущен!")
