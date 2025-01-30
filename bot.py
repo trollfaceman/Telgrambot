@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import ChatMemberUpdated
 
 
 # ✅ Читаем переменные окружения
@@ -59,8 +60,10 @@ group_menu_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="📊 Запросить отчёт")],
         [KeyboardButton(text="ℹ️ Помощь")]
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
+    one_time_keyboard=False  # Оставляет меню постоянно
 )
+
 
 
 class ReportState(StatesGroup):
@@ -75,16 +78,17 @@ class ReportState(StatesGroup):
 async def start_command(message: Message):
     logging.info(f"Бот получил /start в чате {message.chat.id} (тип: {message.chat.type})")
 
-    if message.chat.type == "private":  # В ЛИЧКЕ – Inline-кнопки
+    if message.chat.type == "private":
         await message.answer(
             "Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:",
-            reply_markup=menu_keyboard  # Inline-кнопки
+            reply_markup=menu_keyboard
         )
-    else:  # В ГРУППЕ – Reply-клавиатура (меню в поле ввода)
+    else:
         await message.answer(
             "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Выбери команду ниже:",
             reply_markup=group_menu_keyboard
         )
+
 
 
 
@@ -280,6 +284,15 @@ async def help_callback(callback: types.CallbackQuery):
     await help_command(callback.message)
 
 
+@dp.chat_member()
+async def bot_added_to_group(event: ChatMemberUpdated):
+    if event.new_chat_member and event.new_chat_member.user.id == bot.id:
+        logging.info(f"Бот добавлен в группу: {event.chat.id}")
+        await bot.send_message(
+            event.chat.id,
+            "Привет! Теперь ты можешь отправлять отчёты прямо из группы. Выбери команду ниже:",
+            reply_markup=group_menu_keyboard
+        )
 
 async def keep_awake():
     while True:
