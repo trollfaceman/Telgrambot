@@ -1,6 +1,8 @@
 import os
 import logging
 import psycopg2
+from fastapi import FastAPI
+import uvicorn
 import asyncio
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
@@ -141,6 +143,15 @@ async def send_reminders():
     for user_id in users:
         await bot.send_message(user_id[0], "📝 Время заполнить отчёт! Напиши /report")
 
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"message": "Bot is running"}
+
+async def start_bot():
+    await main()  # Запускаем бота
+
 # 📌 Запуск бота
 async def main():
     dp.message.register(start_command, Command("start"))
@@ -161,4 +172,8 @@ async def main():
     await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_bot())  # Запуск бота в фоне
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))  # Запуск веб-сервера
+
