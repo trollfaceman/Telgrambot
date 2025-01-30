@@ -55,6 +55,10 @@ menu_keyboard = ReplyKeyboardMarkup(keyboard=[
 class ReportState(StatesGroup):
     waiting_for_confirmation = State()
 
+class ReportState(StatesGroup):
+    waiting_for_report = State()
+
+
 
 # 📌 Команда /start
 async def start_command(message: Message):
@@ -62,14 +66,20 @@ async def start_command(message: Message):
     await message.answer("Привет! Я буду спрашивать тебя каждый день, что ты делал.\n\nВыбери команду ниже:", reply_markup=menu_keyboard)
 
 # 📌 Команда /report (или кнопка "📢 Сообщить отчёт")
-async def report_command(message: Message):
+async def report_command(message: Message, state: FSMContext):
     await message.answer("✏️ Напиши, что ты сегодня делал, и я запишу это как отчёт.")
+    await state.set_state(ReportState.waiting_for_report)  # ✅ Бот теперь "ждёт" текст отчёта
+
 
 async def handle_report_text(message: Message, state: FSMContext):
-    if not message.text.startswith("/report"):  # ✅ Игнорируем всё кроме команд
+    state_data = await state.get_state()
+    
+    # ✅ Если бот НЕ находится в ожидании отчёта — игнорируем сообщение
+    if state_data != ReportState.waiting_for_report.state:
         return
+    
     user_data = await state.get_data()
-    append_mode = user_data.get("append_mode", False)  # Проверяем, режим ли "добавления"
+    append_mode = user_data.get("append_mode", False)
 
     # Проверяем, есть ли уже отчёт за сегодня
     cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
@@ -77,26 +87,22 @@ async def handle_report_text(message: Message, state: FSMContext):
     existing_report = cur.fetchone()
 
     if append_mode and existing_report:
-        # Дописываем текст к существующему отчёту
         new_text = user_data.get("report_text") + "\n" + message.text.strip()
         cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
                     (new_text, message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
         conn.commit()
-        
         await message.answer("✅ Твой отчёт дополнен!", reply_markup=menu_keyboard)
         await state.clear()
         return
 
     if existing_report:
-        # Кнопки выбора: заменить или дополнить
         edit_keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Изменить отчёт", callback_data="edit_existing_report")],
             [InlineKeyboardButton(text="➕ Добавить к отчёту", callback_data="add_to_report")]
         ])
         await message.answer("⚠️ У тебя уже есть отчёт за сегодня. Что ты хочешь сделать?", reply_markup=edit_keyboard)
-        return  # Выход из функции, чтобы не предлагать подтвердить новый отчёт
+        return
 
-    # Запрашиваем подтверждение перед сохранением
     text = message.text.strip()
     await state.update_data(report_text=text, append_mode=False)
 
