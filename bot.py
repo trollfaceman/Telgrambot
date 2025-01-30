@@ -152,8 +152,18 @@ async def send_reminders():
 
 # 📌 Запуск бота
 async def main():
+    dp.message.register(start_command, Command("start"))
+    dp.message.register(help_command, Command("help"))
+    dp.message.register(report_command, Command("report"))
+    dp.message.register(get_report_command, Command("get"))
+    dp.message.register(reminder_command, Command("reminder"))
+
+    dp.message.register(handle_report_text, F.text)
+
     scheduler.add_job(lambda: asyncio.create_task(send_reminders()), "cron", minute="*", second=0)
     scheduler.start()
+
+    logging.info("Бот успешно запущен!")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
 
