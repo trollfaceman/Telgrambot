@@ -2,6 +2,7 @@ import os
 import logging
 import psycopg2
 import asyncio
+import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -24,20 +25,28 @@ if not TOKEN or not DATABASE_URL:
     raise ValueError("Не заданы переменные окружения TOKEN и DATABASE_URL")
 
 # Подключаемся к PostgreSQL
-conn = psycopg2.connect(DATABASE_URL)
-cur = conn.cursor()
+async def get_db_connection():
+    return await asyncpg.connect(DATABASE_URL)
+
+async def execute_query(query, *args):
+    conn = await get_db_connection()
+    try:
+        return await conn.fetch(query, *args)
+    finally:
+        await conn.close()
 
 # Создаём таблицу, если её нет
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS reports (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        username TEXT,
-        text TEXT,
-        date TEXT
-    )
-""")
-conn.commit()
+async def create_tables():
+    query = """
+        CREATE TABLE IF NOT EXISTS reports (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            username TEXT,
+            text TEXT,
+            date TEXT
+        )
+    """
+    await execute_query(query)
 
 # Инициализируем бота
 bot = Bot(token=TOKEN)
@@ -99,20 +108,26 @@ async def handle_report_text(message: Message, state: FSMContext):
     user_data = await state.get_data()
     append_mode = user_data.get("append_mode", False)
 
-    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
-                (message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
-    existing_report = cur.fetchone()
+    existing_report = await execute_query(
+        "SELECT text FROM reports WHERE user_id = $1 AND date = $2",
+        message.from_user.id, datetime.now().strftime("%Y-%m-%d")
+    )
+
+    if existing_report:
+        existing_report = existing_report[0]["text"]  # Получаем строку текста
 
     if append_mode and existing_report:
-        new_text = existing_report[0] + "\n" + message.text.strip()  # 🟢 Добавляем к существующему отчёту
-        cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
-                    (new_text, message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
-        conn.commit()
+        new_text = existing_report + "\n" + message.text.strip()
+        await execute_query(
+            "UPDATE reports SET text = $1 WHERE user_id = $2 AND date = $3",
+            new_text, message.from_user.id, datetime.now().strftime("%Y-%m-%d")
+        )
 
         keyboard = menu_keyboard_private if message.chat.type == "private" else menu_keyboard_group
         await message.answer("✅ Твой отчёт дополнен!", reply_markup=keyboard)
-        await state.clear()  # 🟢 Сбрасываем состояние после добавления
+        await state.clear()
         return
+
 
     # 🟢 Клавиатура выбора действия (изменить, добавить, отмена)
     edit_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -142,8 +157,8 @@ async def handle_report_text(message: Message, state: FSMContext):
 # 📌 Команда /get (или кнопка "📊 Запросить отчёт")
 async def get_report_command(message: Message):
     try:
-        cur.execute("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
-        users_from_db = cur.fetchall()
+        users_from_db = await execute_query("SELECT DISTINCT username FROM reports WHERE username IS NOT NULL")
+
 
         if not users_from_db:
             await message.answer("❌ Нет доступных пользователей.")
@@ -184,41 +199,53 @@ async def select_user(callback: types.CallbackQuery):
 async def select_date(callback: types.CallbackQuery):
     _, username, date = callback.data.split("_")
 
-    cur.execute("SELECT text FROM reports WHERE username=%s AND date=%s", (username, date))
-    record = cur.fetchone()
+    record = await execute_query(
+        "SELECT text FROM reports WHERE username = $1 AND date = $2",
+        username, date
+        )
 
     if record:
-        await callback.message.answer(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
+        await callback.message.answer(f"📝 Отчёт @{username} за {date}:\n{record[0]['text']}")
     else:
         await callback.message.answer(f"❌ Нет отчётов @{username} за {date}.")
+
+        if record:
+            await callback.message.answer(f"📝 Отчёт @{username} за {date}:\n{record[0]}")
+        else:
+            await callback.message.answer(f"❌ Нет отчётов @{username} за {date}.")
 
 
 @dp.callback_query(lambda c: c.data == "confirm_report")
 async def confirm_report(callback: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     new_text = user_data.get("report_text")
-    append_mode = user_data.get("append_mode", False)  # Проверяем, дополняем ли мы отчёт
+    append_mode = user_data.get("append_mode", False)
 
-    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s", 
-                (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
-    existing_report = cur.fetchone()
+    existing_report = await execute_query(
+        "SELECT text FROM reports WHERE user_id = $1 AND date = $2",
+        callback.from_user.id, datetime.now().strftime("%Y-%m-%d")
+    )
+
+    if existing_report:
+        existing_report = existing_report[0]["text"]
 
     if existing_report and append_mode:
-        # Дописываем новый текст к старому
-        updated_text = existing_report[0] + "\n" + new_text
-        cur.execute("UPDATE reports SET text = %s WHERE user_id = %s AND date = %s", 
-                    (updated_text, callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
+        updated_text = existing_report + "\n" + new_text
+        await execute_query(
+            "UPDATE reports SET text = $1 WHERE user_id = $2 AND date = $3",
+            updated_text, callback.from_user.id, datetime.now().strftime("%Y-%m-%d")
+        )
     else:
-        # Записываем новый отчёт
-        cur.execute("INSERT INTO reports (user_id, username, text, date) VALUES (%s, %s, %s, %s)",
-                    (callback.from_user.id, callback.from_user.username, new_text, datetime.now().strftime("%Y-%m-%d")))
-
-    conn.commit()
+        await execute_query(
+            "INSERT INTO reports (user_id, username, text, date) VALUES ($1, $2, $3, $4)",
+            callback.from_user.id, callback.from_user.username, new_text, datetime.now().strftime("%Y-%m-%d")
+        )
 
     keyboard = menu_keyboard_private if callback.message.chat.type == "private" else menu_keyboard_group
     await callback.message.answer("✅ Отчёт записан!", reply_markup=keyboard)
     await state.clear()
     await callback.answer()
+
 
 
 
@@ -240,9 +267,11 @@ async def edit_report(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "edit_existing_report")
 async def edit_existing_report(callback: types.CallbackQuery, state: FSMContext):
-    cur.execute("DELETE FROM reports WHERE user_id = %s AND date = %s",
-                (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
-    conn.commit()
+    await execute_query(
+    "DELETE FROM reports WHERE user_id = $1 AND date = $2",
+    callback.from_user.id, datetime.now().strftime("%Y-%m-%d")
+)
+
 
     await state.clear()  # Удаляем все состояния, чтобы не зависнуть в старых данных
     await callback.message.answer("✏️ Напиши новый отчёт:")
@@ -253,14 +282,16 @@ async def edit_existing_report(callback: types.CallbackQuery, state: FSMContext)
 
 @dp.callback_query(lambda c: c.data == "add_to_report")
 async def add_to_report(callback: types.CallbackQuery, state: FSMContext):
-    cur.execute("SELECT text FROM reports WHERE user_id = %s AND date = %s",
-                (callback.from_user.id, datetime.now().strftime("%Y-%m-%d")))
-    existing_report = cur.fetchone()
+    existing_report = await execute_query(
+        "SELECT text FROM reports WHERE user_id = $1 AND date = $2",
+        callback.from_user.id, datetime.now().strftime("%Y-%m-%d")
+    )
 
     if existing_report:
-        await state.update_data(report_text=existing_report[0], append_mode=True)  # 🟢 Устанавливаем режим добавления
+        existing_report = existing_report[0]["text"]  # Получаем строку текста
+        await state.update_data(report_text=existing_report, append_mode=True)  # 🟢 Теперь без ошибки!
         await callback.message.answer("✏️ Напиши, что хочешь добавить к отчёту:")
-        await state.set_state(ReportState.waiting_for_report)  # 🟢 Устанавливаем правильное состояние
+        await state.set_state(ReportState.waiting_for_report)
     else:
         await callback.message.answer("⚠️ Ошибка: нет отчёта для дополнения.")
 
@@ -349,6 +380,8 @@ async def on_shutdown():
     logging.info("Бот остановлен. Соединение с БД закрыто.")
 
 async def main():
+    await create_tables()  # Создаём таблицы перед запуском бота
+
     dp.message.register(start_command, Command("start"))
     dp.message.register(report_command, Command("report"))
     dp.message.register(get_report_command, Command("get"))
@@ -362,17 +395,11 @@ async def main():
     dp.callback_query.register(edit_existing_report)
     dp.callback_query.register(add_to_report)
 
-    # 📌 Логирование всех обновлений, чтобы видеть, что получает бот
-    @dp.update()
-    async def handle_all_updates(update: types.Update):
-        logging.info(f"🔹 Получено обновление: {update}")
-
     scheduler.add_job(daily_task, "cron", hour=18)
     scheduler.start()
 
     asyncio.create_task(keep_awake())
 
-    # Логирование зарегистрированных хендлеров (проверка)
     logging.info(f"✅ Зарегистрированные хендлеры: {dp.message.handlers}")
 
     await bot.delete_webhook(drop_pending_updates=True)
@@ -385,4 +412,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    while True:
+        try:
+            asyncio.run(main())  # ✅ Запускаем всё внутри main()
+        except Exception as e:
+            logging.error(f"Бот упал с ошибкой: {e}")
+            asyncio.sleep(5)
